@@ -1,0 +1,29 @@
+# Banco de dados (contem dados financeiros reais)
+*.db
+*.sqlite
+
+# Secrets do Streamlit (contem a senha)
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Claude Code
+.claude/
