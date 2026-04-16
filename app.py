@@ -4,7 +4,7 @@ Ponto de entrada Streamlit.
 """
 
 import streamlit as st
-from database import init_db
+from database import init_db, _using_postgres
 
 init_db()
 
@@ -50,6 +50,10 @@ MODULOS = {
 
 st.sidebar.title("Mundukide")
 st.sidebar.caption("Controle Financeiro")
+if _using_postgres:
+    st.sidebar.caption("Banco: PostgreSQL (nuvem)")
+else:
+    st.sidebar.caption("Banco: SQLite (local)")
 st.sidebar.markdown("---")
 
 escolha = st.sidebar.radio("Navegacao", list(MODULOS.keys()))

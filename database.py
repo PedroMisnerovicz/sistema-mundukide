@@ -1,5 +1,3 @@
-import sqlite3
-
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, Session
 from pathlib import Path
@@ -8,20 +6,23 @@ from pathlib import Path
 # Se existir DATABASE_URL nos secrets do Streamlit, usa PostgreSQL (nuvem).
 # Caso contrario, usa SQLite local (desenvolvimento).
 
+_using_postgres = False
+
 try:
     import streamlit as st
-    DATABASE_URL = st.secrets.get("database", {}).get("url", "")
+    _db_url = st.secrets["database"]["url"]
+    if _db_url:
+        _using_postgres = True
 except Exception:
-    DATABASE_URL = ""
+    _db_url = ""
 
-if DATABASE_URL:
+if _using_postgres:
     # PostgreSQL (Supabase / nuvem)
-    engine = create_engine(DATABASE_URL, echo=False)
+    engine = create_engine(_db_url, echo=False)
 else:
     # SQLite local
     DB_PATH = Path(__file__).parent / "mundukide.db"
-    DATABASE_URL = f"sqlite:///{DB_PATH}"
-    engine = create_engine(DATABASE_URL, echo=False)
+    engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
 
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragma(dbapi_connection, connection_record):
@@ -43,15 +44,15 @@ def _apply_migrations():
     Funciona tanto para SQLite quanto para PostgreSQL."""
     with engine.connect() as conn:
         # Verifica colunas de categorias_despesa
-        if engine.url.drivername.startswith("sqlite"):
-            result = conn.execute(text("PRAGMA table_info(categorias_despesa)"))
-            cols = {row[1] for row in result.fetchall()}
-        else:
+        if _using_postgres:
             result = conn.execute(text(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_name = 'categorias_despesa'"
             ))
             cols = {row[0] for row in result.fetchall()}
+        else:
+            result = conn.execute(text("PRAGMA table_info(categorias_despesa)"))
+            cols = {row[1] for row in result.fetchall()}
 
         if "teto_brl" not in cols:
             conn.execute(text(
@@ -67,15 +68,15 @@ def _apply_migrations():
             ))
 
         # Verifica colunas de tecnicos
-        if engine.url.drivername.startswith("sqlite"):
-            result = conn.execute(text("PRAGMA table_info(tecnicos)"))
-            cols_tec = {row[1] for row in result.fetchall()}
-        else:
+        if _using_postgres:
             result = conn.execute(text(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_name = 'tecnicos'"
             ))
             cols_tec = {row[0] for row in result.fetchall()}
+        else:
+            result = conn.execute(text("PRAGMA table_info(tecnicos)"))
+            cols_tec = {row[1] for row in result.fetchall()}
 
         if "custo_maximo" not in cols_tec:
             conn.execute(text(
