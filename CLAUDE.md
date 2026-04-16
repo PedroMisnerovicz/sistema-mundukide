@@ -18,7 +18,7 @@ Atue como um Engenheiro de Software Senior especialista em Python, Pandas, SQLAl
 | Graficos | Plotly (gauge charts, barras horizontais) |
 | Geracao de PDF | fpdf2 + kaleido (export de graficos Plotly como PNG) |
 | ORM | SQLAlchemy 2.0 |
-| Banco de dados | SQLite (`mundukide.db`) |
+| Banco de dados | PostgreSQL (Supabase nuvem) + SQLite (local) |
 
 ---
 
@@ -26,11 +26,14 @@ Atue como um Engenheiro de Software Senior especialista em Python, Pandas, SQLAl
 
 ```
 3.SISTEMA_MUNDUKIDE/
-  app.py                  # Ponto de entrada — navegacao por sidebar
-  models.py               # Modelos SQLAlchemy (6 entidades)
-  database.py             # Engine, SessionLocal, init_db()
-  mundukide.db            # SQLite gerado automaticamente
+  app.py                  # Ponto de entrada — navegacao por sidebar + tela de senha
+  models.py               # Modelos SQLAlchemy (7 entidades)
+  database.py             # Engine dual (PostgreSQL nuvem / SQLite local)
+  mundukide.db            # SQLite local (NAO vai pro GitHub)
   requirements.txt        # Dependencias
+  .gitignore              # Protege arquivos sensiveis
+  .streamlit/
+    secrets.toml           # Senha e URL do banco (NAO vai pro GitHub)
   CLAUDE.md               # Este arquivo
   modulos/
     __init__.py
@@ -38,7 +41,10 @@ Atue como um Engenheiro de Software Senior especialista em Python, Pandas, SQLAl
     lancamentos.py         # Lancamentos manuais de despesas
     importacao_ofx.py      # Upload e parse de extratos OFX
     conciliacao.py         # Conciliacao bancaria + splits
+    folha_pagamento.py     # Calculo de folha com encargos BR
+    fluxo_caixa.py         # Projecao de fluxo de caixa
     dashboard.py           # Dashboard gerencial + exportacao PDF
+    carimbo_pdf.py         # Carimbo AVCD em documentos PDF
 ```
 
 ---
@@ -173,19 +179,60 @@ Cada opcao carrega o `render()` do modulo correspondente.
 streamlit>=1.30.0
 pandas>=2.0.0
 sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
 ofxparse>=0.21
 plotly>=5.18.0
 fpdf2
 kaleido
+pymupdf>=1.24.0
 ```
 
 ---
 
 ## Banco de Dados
 
-- **Arquivo:** `mundukide.db` (SQLite, criado automaticamente)
-- **Inicializacao:** `init_db()` executado no startup do app — cria tabelas se nao existem
-- **Foreign Keys:** Habilitadas via evento de conexao SQLAlchemy (`PRAGMA foreign_keys=ON`)
+- **Nuvem (producao):** PostgreSQL no Supabase (projeto `mundukide`, regiao Sao Paulo)
+- **Local (desenvolvimento):** SQLite (`mundukide.db`, criado automaticamente)
+- **Deteccao automatica:** `database.py` le `st.secrets["database"]["url"]`. Se existir, usa PostgreSQL; senao, usa SQLite.
+- **Inicializacao:** `init_db()` executado no startup — cria tabelas se nao existem
+- **Foreign Keys:** Habilitadas via PRAGMA no SQLite; nativas no PostgreSQL
+
+---
+
+## Deploy e Infraestrutura
+
+### Streamlit Community Cloud
+- **Repositorio:** github.com/PedroMisnerovicz/sistema-mundukide (branch `main`)
+- **Arquivo principal:** `app.py`
+- **Secrets configurados no painel do Streamlit Cloud:**
+  - `[passwords] app_password` — senha de acesso ao app
+  - `[database] url` — URL de conexao ao PostgreSQL (Supabase, session pooler)
+- **Autenticacao:** tela de senha no inicio do app.py usando `st.secrets`
+
+### Supabase
+- **Projeto:** mundukide
+- **Regiao:** South America (Sao Paulo) — sa-east-1
+- **Conexao:** usar Session Pooler (host: aws-1-sa-east-1.pooler.supabase.com:5432)
+
+### Arquivos protegidos (.gitignore)
+- `*.db` — banco de dados local
+- `.streamlit/secrets.toml` — senha e URL do banco
+- `migrar_dados.py` — script de migracao com credenciais
+- `__pycache__/`, `.claude/`
+
+### Como atualizar o sistema
+1. Alterar arquivos no computador local
+2. Testar com `streamlit run app.py`
+3. Enviar: `git add .` → `git commit -m "descricao"` → `git push`
+4. Streamlit Cloud atualiza automaticamente em 2-3 minutos
+
+### Como trocar a senha do app
+- **Local:** editar `.streamlit/secrets.toml`
+- **Nuvem:** share.streamlit.io → app → "..." → Settings → Secrets
+
+### Como trocar a senha do banco
+- Alterar no Supabase (Project Settings → Database)
+- Atualizar a URL nos Secrets do Streamlit Cloud (lembrar de codificar caracteres especiais: `#` → `%23`, `@` → `%40`)
 
 ---
 
