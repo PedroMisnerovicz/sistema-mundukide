@@ -25,5 +25,8 @@ env/
 Thumbs.db
 desktop.ini
 
+# Script de migracao (contem credenciais)
+migrar_dados.py
+
 # Claude Code
 .claude/
