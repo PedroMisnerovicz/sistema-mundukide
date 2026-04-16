@@ -6,17 +6,17 @@ from pathlib import Path
 # Se existir DATABASE_URL nos secrets do Streamlit, usa PostgreSQL (nuvem).
 # Caso contrario, usa SQLite local (desenvolvimento).
 
-_using_postgres = False
+USING_POSTGRES = False
 
 try:
     import streamlit as st
     _db_url = st.secrets["database"]["url"]
     if _db_url:
-        _using_postgres = True
+        USING_POSTGRES = True
 except Exception:
     _db_url = ""
 
-if _using_postgres:
+if USING_POSTGRES:
     # PostgreSQL (Supabase / nuvem)
     engine = create_engine(_db_url, echo=False)
 else:
@@ -44,7 +44,7 @@ def _apply_migrations():
     Funciona tanto para SQLite quanto para PostgreSQL."""
     with engine.connect() as conn:
         # Verifica colunas de categorias_despesa
-        if _using_postgres:
+        if USING_POSTGRES:
             result = conn.execute(text(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_name = 'categorias_despesa'"
@@ -68,7 +68,7 @@ def _apply_migrations():
             ))
 
         # Verifica colunas de tecnicos
-        if _using_postgres:
+        if USING_POSTGRES:
             result = conn.execute(text(
                 "SELECT column_name FROM information_schema.columns "
                 "WHERE table_name = 'tecnicos'"
