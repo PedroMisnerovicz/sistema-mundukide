@@ -1,6 +1,7 @@
 streamlit>=1.30.0
 pandas>=2.0.0
 sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
 ofxparse>=0.21
 plotly>=5.18.0
 fpdf2
