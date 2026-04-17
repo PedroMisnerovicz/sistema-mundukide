@@ -601,7 +601,7 @@ def _gerar_xlsx_financiador(session, cambio):
         .join(CategoriaDespesa)
         .join(CentroCusto)
         .order_by(
-            ItemDespesa.data_pagamento, ItemDespesa.data, ItemDespesa.id,
+            ItemDespesa.data_emissao, ItemDespesa.data, ItemDespesa.id,
         )
         .all()
     )
@@ -611,14 +611,14 @@ def _gerar_xlsx_financiador(session, cambio):
     for item in itens:
         cat = item.categoria_despesa
         cc = cat.centro_custo
-        data_ref = item.data_pagamento or item.data
+        data_ref = item.data_emissao or item.data
         valor_brl = -float(item.valor_brl)
         valor_eur = (valor_brl / cambio_f) if cambio_f else 0.0
 
         linhas.append({
             "C_CREATED_DATE": data_ref,
             "C_DESCRIPTION": item.descricao or "",
-            "C_CONTRACT": "M349",
+            "C_CONTRACT": "M349BN1-BR",
             "C_ACCOUNT": f"{cc.codigo} {cat.nome}",
             "C_TAGS": "",
             "C_TAGS_IDS": "",
