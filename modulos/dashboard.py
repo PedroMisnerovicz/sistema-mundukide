@@ -11,6 +11,7 @@ Visao gerencial do projeto com:
 """
 
 import io
+import unicodedata
 from datetime import date
 from decimal import Decimal
 
@@ -19,6 +20,34 @@ import plotly.graph_objects as go
 import streamlit as st
 from fpdf import FPDF
 from sqlalchemy import extract, func as sqlfunc
+
+
+# De-para: nome da categoria no sistema (normalizado: minusculo, sem acento)
+# → nome exato exigido pelo financiador na coluna C_ACCOUNT do export.
+# Se a categoria nao estiver aqui, cai no fallback e usa o proprio nome.
+MAPA_CATEGORIAS_FINANCIADOR = {
+    "alimentacao": "B Alimentação e alojamento",
+    "alojamento": "B Alimentação e alojamento",
+    "assessoria contabil": "E Serviços",
+    "assessoria juridica": "E Serviços",
+    "combustivel": "A Transporte",
+    "material didatico": "F Outras despesas e H Projecto",
+    "passagem aerea": "A Transporte",
+    "passagem de onibus": "A Transporte",
+    "notebooks/computador": "D Fornecimentos",
+    "energia": "D Fornecimentos",
+    "internet": "D Fornecimentos",
+    "encargos sociais": "G Pessoas",
+    "salarios": "G Pessoas",
+}
+
+
+def _normalizar_nome_categoria(nome: str) -> str:
+    if not nome:
+        return ""
+    s = unicodedata.normalize("NFD", nome)
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return s.lower().strip()
 
 from database import get_session
 from models import (
@@ -624,7 +653,9 @@ def _gerar_xlsx_financiador(session, cambio):
             "C_CREATED_DATE": data_ref,
             "C_DESCRIPTION": descricao,
             "C_CONTRACT": "M349BN1-BR",
-            "C_ACCOUNT": cat.nome,
+            "C_ACCOUNT": MAPA_CATEGORIAS_FINANCIADOR.get(
+                _normalizar_nome_categoria(cat.nome), cat.nome,
+            ),
             "C_TAGS": "",
             "C_TAGS_IDS": "",
             "C_AMOUNT": round(valor_brl, 2),
