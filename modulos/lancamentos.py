@@ -190,6 +190,7 @@ def _aba_novo(session):
         freq = "MENSAL"
         data_inicio_rec = data_pagamento
         data_fim_rec = date(2027, 12, 31)
+        dia_prev_rec = data_pagamento.day
 
         if recorrente:
             col_r1, col_r2, col_r3 = st.columns(3)
@@ -202,6 +203,13 @@ def _aba_novo(session):
             )
             data_fim_rec = col_r3.date_input(
                 "Data de fim", value=date(2027, 12, 31), key="lanc_rec_fim",
+            )
+            dia_prev_rec = st.number_input(
+                "Dia previsto de pagamento (1-31)",
+                min_value=1, max_value=31,
+                value=data_pagamento.day, step=1,
+                key="lanc_rec_dia",
+                help="Usado para sugerir match com o extrato bancario.",
             )
 
         enviar = st.form_submit_button("Registrar Lancamento", type="primary")
@@ -246,6 +254,7 @@ def _aba_novo(session):
                     frequencia=freq,
                     data_inicio=data_inicio_rec,
                     data_fim=data_fim_rec,
+                    dia_pagamento_previsto=int(dia_prev_rec),
                     tecnico_id=None,
                     ativo=True,
                 )
@@ -848,6 +857,7 @@ def _aba_recorrentes(session):
             "Descricao": lr.descricao,
             "Valor": f"R$ {lr.valor_brl:,.2f}",
             "Frequencia": lr.frequencia,
+            "Dia Previsto": lr.dia_pagamento_previsto or "—",
             "Categoria": f"{cat.centro_custo.codigo} | {cat.nome}",
             "Tecnico": tec_nome,
             "Periodo": f"{lr.data_inicio} a {lr.data_fim}",
@@ -908,6 +918,13 @@ def _aba_recorrentes(session):
                 index=["MENSAL", "TRIMESTRAL", "ANUAL"].index(lr_obj.frequencia),
                 key=f"rec_freq_{lr_id}",
             )
+            dia_ed = st.number_input(
+                "Dia previsto de pagamento (1-31, opcional)",
+                min_value=0, max_value=31,
+                value=lr_obj.dia_pagamento_previsto or 0,
+                step=1, key=f"rec_dia_{lr_id}",
+                help="Usado para sugerir match com o extrato bancario. 0 = ultimo dia do mes.",
+            )
             col_d1, col_d2 = st.columns(2)
             inicio_ed = col_d1.date_input("Inicio", value=lr_obj.data_inicio, key=f"rec_ini_{lr_id}")
             fim_ed = col_d2.date_input("Fim", value=lr_obj.data_fim, key=f"rec_fim_{lr_id}")
@@ -918,6 +935,7 @@ def _aba_recorrentes(session):
             lr_obj.valor_brl = _to_decimal(val_ed)
             lr_obj.categoria_despesa_id = opcoes_cat[cat_ed]
             lr_obj.frequencia = freq_ed
+            lr_obj.dia_pagamento_previsto = int(dia_ed) if dia_ed > 0 else None
             lr_obj.data_inicio = inicio_ed
             lr_obj.data_fim = fim_ed
             session.commit()

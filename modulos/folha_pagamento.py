@@ -921,6 +921,21 @@ def _aba_gerar_recorrentes(session):
         cat_ferias = st.selectbox("Provisao de Ferias", cat_keys, key="cat_ferias")
         cat_13 = st.selectbox("Provisao 13o Salario", cat_keys, key="cat_13")
 
+        st.markdown("---")
+        st.markdown("**Dias previstos de pagamento (para match com o extrato bancario):**")
+        col_dp1, col_dp2 = st.columns(2)
+        dia_salario = col_dp1.number_input(
+            "Dia do Salario Liquido",
+            min_value=1, max_value=31, value=30, step=1,
+            help="Ex: 30 (ultimo dia util do mes)",
+        )
+        dia_encargos = col_dp2.number_input(
+            "Dia dos Encargos (INSS, IRRF, FGTS, PIS, Provisoes)",
+            min_value=1, max_value=31, value=20, step=1,
+            help="Ex: 20 (dia padrao de recolhimento)",
+        )
+
+        st.markdown("---")
         col_d1, col_d2 = st.columns(2)
         data_inicio = col_d1.date_input("Data de inicio", value=date.today())
         data_fim = col_d2.date_input("Data de fim", value=date(2027, 12, 31))
@@ -928,31 +943,38 @@ def _aba_gerar_recorrentes(session):
         gerar = st.form_submit_button("Gerar Lancamentos Recorrentes", type="primary")
 
     if gerar:
-        # Remove recorrentes antigos vinculados a tecnicos
+        # Remove recorrentes antigos vinculados a tecnicos, EXCETO os que ja tiveram
+        # ocorrencias realizadas (ItemDespesa com lancamento_recorrente_id preenchido)
         antigos = (
             session.query(LancamentoRecorrente)
             .filter(LancamentoRecorrente.tecnico_id != None)
             .all()
         )
+        preservados = 0
         for ant in antigos:
-            session.delete(ant)
+            if ant.itens_despesa_realizados:
+                # Preserva historico — apenas desativa para nao aparecer em projecoes
+                ant.ativo = False
+                preservados += 1
+            else:
+                session.delete(ant)
 
         count = 0
         for t in tecnicos:
             folha = calcular_folha_tecnico(t.salario_bruto)
 
             componentes = [
-                (cat_salario, folha["salario_liquido"], f"Salario Liquido - {t.nome}"),
-                (cat_inss_emp, folha["inss"], f"INSS Empregado - {t.nome}"),
-                (cat_irrf, folha["irrf"], f"IRRF - {t.nome}"),
-                (cat_inss_pat, folha["inss_patronal"], f"INSS Patronal - {t.nome}"),
-                (cat_fgts, folha["fgts"], f"FGTS - {t.nome}"),
-                (cat_pis, folha["pis"], f"PIS Folha - {t.nome}"),
-                (cat_ferias, folha["prov_ferias"], f"Prov. Ferias - {t.nome}"),
-                (cat_13, folha["prov_13"], f"Prov. 13o - {t.nome}"),
+                (cat_salario, folha["salario_liquido"], f"Salario Liquido - {t.nome}", dia_salario),
+                (cat_inss_emp, folha["inss"], f"INSS Empregado - {t.nome}", dia_encargos),
+                (cat_irrf, folha["irrf"], f"IRRF - {t.nome}", dia_encargos),
+                (cat_inss_pat, folha["inss_patronal"], f"INSS Patronal - {t.nome}", dia_encargos),
+                (cat_fgts, folha["fgts"], f"FGTS - {t.nome}", dia_encargos),
+                (cat_pis, folha["pis"], f"PIS Folha - {t.nome}", dia_encargos),
+                (cat_ferias, folha["prov_ferias"], f"Prov. Ferias - {t.nome}", dia_encargos),
+                (cat_13, folha["prov_13"], f"Prov. 13o - {t.nome}", dia_encargos),
             ]
 
-            for cat_key, valor, desc in componentes:
+            for cat_key, valor, desc, dia_prev in componentes:
                 if valor <= 0:
                     continue
                 lr = LancamentoRecorrente(
@@ -962,6 +984,7 @@ def _aba_gerar_recorrentes(session):
                     frequencia="MENSAL",
                     data_inicio=data_inicio,
                     data_fim=data_fim,
+                    dia_pagamento_previsto=int(dia_prev),
                     tecnico_id=t.id,
                     ativo=True,
                 )
@@ -969,7 +992,10 @@ def _aba_gerar_recorrentes(session):
                 count += 1
 
         session.commit()
-        st.success(f"{count} lancamentos recorrentes gerados com sucesso!")
+        msg = f"{count} lancamentos recorrentes gerados com sucesso!"
+        if preservados:
+            msg += f" ({preservados} recorrente(s) antigo(s) com historico foram desativados em vez de excluidos.)"
+        st.success(msg)
         st.rerun()
 
     # Mostra recorrentes existentes vinculados a tecnicos

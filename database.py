@@ -92,6 +92,15 @@ def _apply_migrations():
                     "ALTER TABLE tecnicos ADD COLUMN custo_maximo NUMERIC(14,2)"
                 ))
 
+            # ── lancamentos_recorrentes (Fase 3 do refactor) ─
+            if _tabela_existe(conn, "lancamentos_recorrentes"):
+                cols_lr = _colunas(conn, "lancamentos_recorrentes")
+                if "dia_pagamento_previsto" not in cols_lr:
+                    conn.execute(text(
+                        "ALTER TABLE lancamentos_recorrentes "
+                        "ADD COLUMN dia_pagamento_previsto INTEGER"
+                    ))
+
             # ── itens_despesa (Fase 1 do refactor) ───────────
             if _tabela_existe(conn, "itens_despesa"):
                 cols_item = _colunas(conn, "itens_despesa")

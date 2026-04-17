@@ -10,6 +10,7 @@ Dois fluxos para cada transacao OFX:
   Ambos podem ser combinados na mesma transacao.
 """
 
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
 import pandas as pd
@@ -20,10 +21,17 @@ from models import (
     CentroCusto,
     CategoriaDespesa,
     ItemDespesa,
+    LancamentoRecorrente,
     Reembolso,
     Remessa,
     TransacaoBancaria,
 )
+
+# Janela (em dias) para sugerir match entre debito bancario e projecao de folha.
+JANELA_MATCH_FOLHA_DIAS = 15
+
+# Tolerancia em BRL para considerar valor "igual" (arredondamentos).
+TOLERANCIA_MATCH_VALOR = Decimal("0.01")
 
 
 def _to_decimal(valor, fallback=Decimal("0.00")):
@@ -45,6 +53,81 @@ def _opcoes_categorias(session):
         f"{cat.centro_custo.codigo} | {cat.nome}": cat.id
         for cat in categorias
     }
+
+
+def _lr_ocorre_no_mes(lr: LancamentoRecorrente, ano: int, mes: int) -> bool:
+    """Verifica se um lancamento recorrente tem ocorrencia no mes/ano dado."""
+    if date(ano, mes, 1) < date(lr.data_inicio.year, lr.data_inicio.month, 1):
+        return False
+    if date(ano, mes, 1) > date(lr.data_fim.year, lr.data_fim.month, 1):
+        return False
+    if lr.frequencia == "MENSAL":
+        return True
+    if lr.frequencia == "TRIMESTRAL":
+        meses_desde = (ano - lr.data_inicio.year) * 12 + (mes - lr.data_inicio.month)
+        return meses_desde % 3 == 0
+    if lr.frequencia == "ANUAL":
+        return mes == lr.data_inicio.month
+    return False
+
+
+def _meses_proximos(data_ref: date, raio: int = 1):
+    """Gera (ano, mes) para os meses ao redor da data de referencia (para busca de match)."""
+    for delta in range(-raio, raio + 1):
+        mes = data_ref.month + delta
+        ano = data_ref.year
+        while mes < 1:
+            mes += 12
+            ano -= 1
+        while mes > 12:
+            mes -= 12
+            ano += 1
+        yield (ano, mes)
+
+
+def _candidatos_folha(session, tx: TransacaoBancaria) -> list:
+    """Retorna lista de tuplas (lr, ano, mes, data_projetada, dias_diff) ordenadas
+    por proximidade de data para um debito bancario tx.
+    Criterios:
+      - lr ativo
+      - valor igual ao debito (tolerancia R$ 0,01)
+      - ocorrencia projetada dentro de ±JANELA_MATCH_FOLHA_DIAS da data do debito
+      - ocorrencia ainda nao realizada no mes
+    """
+    valor_abs = abs(tx.valor)
+
+    recorrentes = (
+        session.query(LancamentoRecorrente)
+        .filter(
+            LancamentoRecorrente.ativo == True,
+            LancamentoRecorrente.valor_brl >= valor_abs - TOLERANCIA_MATCH_VALOR,
+            LancamentoRecorrente.valor_brl <= valor_abs + TOLERANCIA_MATCH_VALOR,
+        )
+        .all()
+    )
+
+    candidatos = []
+    for lr in recorrentes:
+        melhor = None  # (dias_diff, ano, mes, data_proj)
+        for ano, mes in _meses_proximos(tx.data, raio=1):
+            if not _lr_ocorre_no_mes(lr, ano, mes):
+                continue
+            data_proj = lr.data_projetada_no_mes(ano, mes)
+            if data_proj < lr.data_inicio or data_proj > lr.data_fim:
+                continue
+            dias_diff = abs((data_proj - tx.data).days)
+            if dias_diff > JANELA_MATCH_FOLHA_DIAS:
+                continue
+            if lr.realizado_no_mes(ano, mes):
+                continue
+            if melhor is None or dias_diff < melhor[0]:
+                melhor = (dias_diff, ano, mes, data_proj)
+        if melhor is not None:
+            dias_diff, ano, mes, data_proj = melhor
+            candidatos.append((lr, ano, mes, data_proj, dias_diff))
+
+    candidatos.sort(key=lambda c: c[4])  # proximidade de data
+    return candidatos
 
 
 def render():
@@ -223,6 +306,62 @@ def _aba_debitos_pendentes(session):
                             st.success(
                                 f"Reembolso de {reemb.beneficiario} vinculado! "
                                 f"{len(reemb.itens_despesa)} despesa(s) conciliada(s) em cascata."
+                            )
+                            st.rerun()
+
+                        st.markdown("---")
+
+                # ─── Fluxo D: Vincular a Folha (LancamentoRecorrente) ───
+                # Apenas possivel quando nenhum split foi criado ainda (saldo == valor total)
+                if not splits_existentes:
+                    candidatos_folha = _candidatos_folha(session, tx)
+
+                    if candidatos_folha:
+                        st.markdown("**Vincular a Folha (Lancamento Recorrente):**")
+                        st.caption(
+                            f"Sugestoes dentro de ±{JANELA_MATCH_FOLHA_DIAS} dias e "
+                            f"com valor igual (±R$ {TOLERANCIA_MATCH_VALOR:,.2f})."
+                        )
+                        opcoes_folha = {}
+                        for lr, ano_oc, mes_oc, data_proj, dias_diff in candidatos_folha:
+                            beneficiario = lr.tecnico.nome if lr.tecnico else "—"
+                            label = (
+                                f"[{data_proj.strftime('%d/%m/%Y')}] "
+                                f"{lr.descricao} — {beneficiario} — "
+                                f"R$ {lr.valor_brl:,.2f} "
+                                f"({dias_diff} dia(s) de diferenca)"
+                            )
+                            opcoes_folha[label] = (lr.id, ano_oc, mes_oc, data_proj)
+
+                        sel_folha = st.selectbox(
+                            "Projecao compativel",
+                            list(opcoes_folha.keys()),
+                            key=f"sel_folha_{tx.id}",
+                        )
+                        if st.button("Vincular a Folha", key=f"btn_vinc_folha_{tx.id}"):
+                            lr_id, ano_oc, mes_oc, data_proj = opcoes_folha[sel_folha]
+                            lr = session.get(LancamentoRecorrente, lr_id)
+                            beneficiario = lr.tecnico.nome if lr.tecnico else lr.descricao
+
+                            # Cria ItemDespesa "realizado" vinculado ao recorrente
+                            novo = ItemDespesa(
+                                transacao_bancaria_id=tx.id,
+                                categoria_despesa_id=lr.categoria_despesa_id,
+                                lancamento_recorrente_id=lr.id,
+                                valor_brl=valor_abs,
+                                descricao=lr.descricao,
+                                fornecedor_cliente=beneficiario,
+                                data=tx.data,
+                                data_emissao=data_proj,
+                                data_pagamento=tx.data,
+                                conciliado=True,
+                            )
+                            session.add(novo)
+                            tx.conciliada = True
+                            session.commit()
+                            st.success(
+                                f"Folha conciliada! '{lr.descricao}' de "
+                                f"{mes_oc:02d}/{ano_oc} foi realizada."
                             )
                             st.rerun()
 
@@ -476,9 +615,17 @@ def _aba_conciliadas(session):
             .first()
         )
 
+        # Identifica se ha ItemDespesa gerado por vinculo a Folha
+        itens_folha = [
+            s for s in tx.itens_despesa
+            if s.lancamento_recorrente_id is not None and s.reembolso_id is None
+        ]
+
         titulo = f"✅ {tx.data} | {tx.descricao} | R$ {valor_abs:,.2f}"
         if reembolso_vinc:
             titulo += f" | Reembolso: {reembolso_vinc.beneficiario}"
+        elif itens_folha:
+            titulo += " | Folha"
 
         with st.expander(titulo):
             if reembolso_vinc:
@@ -487,13 +634,24 @@ def _aba_conciliadas(session):
                     f"de **{reembolso_vinc.beneficiario}** "
                     f"({len(reembolso_vinc.itens_despesa)} despesa(s))."
                 )
+            elif itens_folha:
+                lr = itens_folha[0].lancamento_recorrente
+                st.info(
+                    f"Esta transacao realizou a projecao recorrente "
+                    f"**{lr.descricao}**."
+                )
 
             dados = []
             for s in tx.itens_despesa:
                 cat = s.categoria_despesa
-                origem = "Reembolso" if s.reembolso_id else (
-                    "Manual" if s.conciliado and not s.reembolso_id else "Split direto"
-                )
+                if s.reembolso_id:
+                    origem = "Reembolso"
+                elif s.lancamento_recorrente_id:
+                    origem = "Folha"
+                elif s.conciliado:
+                    origem = "Manual"
+                else:
+                    origem = "Split direto"
                 dados.append({
                     "Fornecedor/Cliente": s.fornecedor_cliente or "—",
                     "Centro de Custo": cat.centro_custo.codigo,
@@ -515,6 +673,9 @@ def _aba_conciliadas(session):
                     for it in reembolso_vinc.itens_despesa:
                         it.transacao_bancaria_id = None
                         it.conciliado = False
+                # Remove itens gerados por vinculo a folha (voltam a ser projecao)
+                for it_folha in itens_folha:
+                    session.delete(it_folha)
                 tx.conciliada = False
                 session.commit()
                 st.info("Conciliacao desfeita. A transacao voltou para pendentes.")

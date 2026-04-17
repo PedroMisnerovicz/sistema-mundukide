@@ -90,8 +90,13 @@ def _projecao_recorrentes(session, meses: list) -> dict:
 
         total_mes = Decimal("0.00")
         for lr in recorrentes:
-            if _recorrente_ocorre_no_mes(lr, ano, mes):
-                total_mes += lr.valor_brl
+            if not _recorrente_ocorre_no_mes(lr, ano, mes):
+                continue
+            # Se ja existe ItemDespesa realizado neste mes para este recorrente,
+            # nao duplica: o ItemDespesa ja conta como saida realizada.
+            if lr.realizado_no_mes(ano, mes):
+                continue
+            total_mes += lr.valor_brl
 
         if total_mes > 0:
             projecao[(ano, mes)] = total_mes
@@ -270,6 +275,7 @@ def render():
     rec_do_mes = [
         lr for lr in recorrentes_mes
         if _recorrente_ocorre_no_mes(lr, a_sel, m_sel)
+        and not lr.realizado_no_mes(a_sel, m_sel)
     ]
 
     if rec_do_mes and (a_sel, m_sel) >= (hoje.year, hoje.month):

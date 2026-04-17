@@ -412,6 +412,11 @@ class LancamentoRecorrente(Base):
     )
     data_inicio = Column(Date, nullable=False)
     data_fim = Column(Date, nullable=False)
+    dia_pagamento_previsto = Column(
+        Integer,
+        nullable=True,
+        comment="Dia do mes (1-31) em que a ocorrencia e esperada — usado no match de folha",
+    )
     tecnico_id = Column(
         Integer,
         ForeignKey("tecnicos.id", ondelete="SET NULL"),
@@ -436,6 +441,16 @@ class LancamentoRecorrente(Base):
             if ref and ref.year == ano and ref.month == mes:
                 return True
         return False
+
+    def data_projetada_no_mes(self, ano: int, mes: int):
+        """Retorna a data esperada da ocorrencia no mes informado.
+        Usa dia_pagamento_previsto ou o ultimo dia do mes como fallback.
+        Ajusta dias invalidos (ex: 31/fev -> 28 ou 29)."""
+        from calendar import monthrange
+        _, ultimo_dia = monthrange(ano, mes)
+        dia = self.dia_pagamento_previsto or ultimo_dia
+        dia = min(dia, ultimo_dia)
+        return date(ano, mes, dia)
 
     def __repr__(self):
         return f"<LancRecorrente {self.descricao} – R${self.valor_brl} ({self.frequencia})>"
