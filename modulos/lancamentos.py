@@ -22,8 +22,10 @@ from models import (
     Reembolso,
     Remessa,
 )
-
-CAMBIO_PROJECAO = Decimal("6.00")
+from modulos.cache_utils import (
+    cambio_medio_cached,
+    opcoes_categorias as opcoes_categorias_cached,
+)
 
 
 def _to_decimal(valor, fallback=Decimal("0.00")):
@@ -33,30 +35,14 @@ def _to_decimal(valor, fallback=Decimal("0.00")):
         return fallback
 
 
-def _cambio_medio(session) -> Decimal:
-    """Cambio medio ponderado das remessas recebidas, ou R$6,00 de projecao."""
-    remessas = session.query(Remessa).filter(Remessa.recebida == True).all()
-    if not remessas:
-        return CAMBIO_PROJECAO
-    total_eur = sum(r.valor_eur for r in remessas)
-    total_brl = sum(r.valor_brl for r in remessas)
-    if not total_eur or total_eur == 0:
-        return CAMBIO_PROJECAO
-    return (Decimal(str(total_brl)) / Decimal(str(total_eur))).quantize(Decimal("0.0001"))
+def _cambio_medio(session=None) -> Decimal:
+    """Cambio medio ponderado (cacheado por 30s)."""
+    return cambio_medio_cached()
 
 
-def _opcoes_categorias(session):
-    """Retorna dict {label: id} de categorias agrupadas por centro de custo."""
-    categorias = (
-        session.query(CategoriaDespesa)
-        .join(CentroCusto)
-        .order_by(CentroCusto.codigo, CategoriaDespesa.nome)
-        .all()
-    )
-    return {
-        f"{cat.centro_custo.codigo} | {cat.nome}": cat.id
-        for cat in categorias
-    }
+def _opcoes_categorias(session=None):
+    """Retorna dict {label: id} de categorias (cacheadas por 30s)."""
+    return opcoes_categorias_cached()
 
 
 def render():

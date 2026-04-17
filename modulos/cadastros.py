@@ -13,6 +13,7 @@ from sqlalchemy import func as sqlfunc
 
 from database import get_session
 from models import CentroCusto, CategoriaDespesa, Remessa, ItemDespesa
+from modulos.cache_utils import invalidar_cache_cadastros
 
 CAMBIO_PROJECAO = Decimal("6.00")
 
@@ -77,6 +78,7 @@ def _aba_centros_custo():
                     )
                     session.add(cc)
                     session.commit()
+                    invalidar_cache_cadastros()
                     st.success(f"Centro '{cc.codigo}' criado!")
                     st.rerun()
 
@@ -130,6 +132,7 @@ def _aba_centros_custo():
             cc_obj.teto_eur = _to_decimal(teto_ed)
             cc_obj.descricao = desc_ed.strip()
             session.commit()
+            invalidar_cache_cadastros()
             st.success("Atualizado!")
             st.rerun()
 
@@ -141,6 +144,7 @@ def _aba_centros_custo():
             if st.button("Excluir", type="primary", key="btn_del_cc"):
                 session.delete(cc_obj)
                 session.commit()
+                invalidar_cache_cadastros()
                 st.success("Excluido!")
                 st.rerun()
 
@@ -206,6 +210,7 @@ def _aba_categorias():
                 )
                 session.add(cat)
                 session.commit()
+                invalidar_cache_cadastros()
                 st.success(f"Categoria '{cat.nome}' criada!")
                 st.rerun()
 
@@ -298,6 +303,7 @@ def _aba_categorias():
                 cat_obj.teto_brl = None
                 cat_obj.tipo_teto = None
             session.commit()
+            invalidar_cache_cadastros()
             st.success("Categoria atualizada!")
             st.rerun()
 
@@ -309,6 +315,7 @@ def _aba_categorias():
             if st.button("Excluir", type="primary", key="btn_del_cat"):
                 session.delete(cat_obj)
                 session.commit()
+                invalidar_cache_cadastros()
                 st.success("Categoria excluida!")
                 st.rerun()
 
@@ -397,6 +404,7 @@ def _aba_remessas():
                     rem.data_recebimento = None
 
                 session.commit()
+                invalidar_cache_cadastros()
                 st.success(f"Remessa {rem.numero} salva!")
                 st.rerun()
 

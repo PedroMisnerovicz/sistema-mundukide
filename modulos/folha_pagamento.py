@@ -23,6 +23,7 @@ from models import (
     LancamentoRecorrente,
     Tecnico,
 )
+from modulos.cache_utils import opcoes_categorias as opcoes_categorias_cached
 
 # ──────────────── Tabelas 2026 ─────────────────────────────
 
@@ -276,17 +277,9 @@ def _to_decimal(valor, fallback=Decimal("0.00")):
         return fallback
 
 
-def _opcoes_categorias(session):
-    categorias = (
-        session.query(CategoriaDespesa)
-        .join(CentroCusto)
-        .order_by(CentroCusto.codigo, CategoriaDespesa.nome)
-        .all()
-    )
-    return {
-        f"{cat.centro_custo.codigo} | {cat.nome}": cat.id
-        for cat in categorias
-    }
+def _opcoes_categorias(session=None):
+    """Retorna dict {label: id} de categorias (cacheadas por 30s)."""
+    return opcoes_categorias_cached()
 
 
 # ──────────────── PDF ─────────────────────────────────────

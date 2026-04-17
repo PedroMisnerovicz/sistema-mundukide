@@ -16,7 +16,18 @@ except Exception:
 
 if _db_url:
     # PostgreSQL (Supabase / nuvem)
-    engine = create_engine(_db_url, echo=False)
+    # Pool configurado para Supabase Session Pooler:
+    # - pool_pre_ping: testa conexao antes de usar (evita erros com conexoes mortas)
+    # - pool_recycle: recicla conexoes a cada 5 min (antes do timeout do pooler)
+    # - pool_size + max_overflow: reusa conexoes, reduzindo latencia
+    engine = create_engine(
+        _db_url,
+        echo=False,
+        pool_pre_ping=True,
+        pool_recycle=300,
+        pool_size=5,
+        max_overflow=5,
+    )
     _is_sqlite = False
 else:
     # SQLite local

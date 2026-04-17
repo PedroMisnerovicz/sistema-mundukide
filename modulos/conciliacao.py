@@ -26,6 +26,7 @@ from models import (
     Remessa,
     TransacaoBancaria,
 )
+from modulos.cache_utils import opcoes_categorias as opcoes_categorias_cached
 
 # Janela (em dias) para sugerir match entre debito bancario e projecao de folha.
 JANELA_MATCH_FOLHA_DIAS = 15
@@ -41,18 +42,9 @@ def _to_decimal(valor, fallback=Decimal("0.00")):
         return fallback
 
 
-def _opcoes_categorias(session):
-    """Retorna dict {label: id} de categorias agrupadas por centro de custo."""
-    categorias = (
-        session.query(CategoriaDespesa)
-        .join(CentroCusto)
-        .order_by(CentroCusto.codigo, CategoriaDespesa.nome)
-        .all()
-    )
-    return {
-        f"{cat.centro_custo.codigo} | {cat.nome}": cat.id
-        for cat in categorias
-    }
+def _opcoes_categorias(session=None):
+    """Retorna dict {label: id} de categorias (cacheadas por 30s)."""
+    return opcoes_categorias_cached()
 
 
 def _lr_ocorre_no_mes(lr: LancamentoRecorrente, ano: int, mes: int) -> bool:
