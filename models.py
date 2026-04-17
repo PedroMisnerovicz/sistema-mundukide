@@ -282,16 +282,43 @@ class ItemDespesa(Base):
         ForeignKey("categorias_despesa.id", ondelete="RESTRICT"),
         nullable=False,
     )
+    reembolso_id = Column(
+        Integer,
+        ForeignKey("reembolsos.id", ondelete="CASCADE"),
+        nullable=True,
+        comment="Preenchido quando a despesa faz parte de um reembolso",
+    )
+    lancamento_recorrente_id = Column(
+        Integer,
+        ForeignKey("lancamentos_recorrentes.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="Preenchido quando a despesa realiza uma projecao recorrente (ex: folha)",
+    )
     valor_brl = Column(
         Numeric(14, 2),
         nullable=False,
         comment="Parcela em BRL alocada a esta categoria/centro de custo",
     )
     descricao = Column(String(255), default="")
+    fornecedor_cliente = Column(
+        String(200),
+        nullable=True,
+        comment="Nome do fornecedor ou cliente envolvido",
+    )
     data = Column(
         Date,
         nullable=False,
-        comment="Data da despesa (herdada da transação ou informada)",
+        comment="Data da despesa (legado — manter sincronizada com data_pagamento)",
+    )
+    data_emissao = Column(
+        Date,
+        nullable=True,
+        comment="Data da nota/documento de origem",
+    )
+    data_pagamento = Column(
+        Date,
+        nullable=True,
+        comment="Data efetiva de saida do banco — usada na conciliacao",
     )
     conciliado = Column(
         Boolean,
@@ -305,6 +332,10 @@ class ItemDespesa(Base):
     )
     categoria_despesa = relationship(
         "CategoriaDespesa", back_populates="itens_despesa"
+    )
+    reembolso = relationship("Reembolso", back_populates="itens_despesa")
+    lancamento_recorrente = relationship(
+        "LancamentoRecorrente", back_populates="itens_despesa_realizados",
     )
 
     @property
@@ -394,6 +425,65 @@ class LancamentoRecorrente(Base):
         "CategoriaDespesa", back_populates="lancamentos_recorrentes",
     )
     tecnico = relationship("Tecnico", back_populates="lancamentos_recorrentes")
+    itens_despesa_realizados = relationship(
+        "ItemDespesa", back_populates="lancamento_recorrente", lazy="select",
+    )
+
+    def realizado_no_mes(self, ano: int, mes: int) -> bool:
+        """True se existe ItemDespesa vinculado cuja data_pagamento cai no mes informado."""
+        for item in self.itens_despesa_realizados:
+            ref = item.data_pagamento or item.data
+            if ref and ref.year == ano and ref.month == mes:
+                return True
+        return False
 
     def __repr__(self):
         return f"<LancRecorrente {self.descricao} – R${self.valor_brl} ({self.frequencia})>"
+
+
+# ─────────────────────────── Reembolso ──────────────────────
+
+class Reembolso(Base):
+    """
+    Pagamento unico a um beneficiario que consolida varias despesas
+    de categorias/centros de custo diferentes.
+
+    Exemplo: reembolso de viagem do Joao no valor de R$ 1.500,00 cobrindo
+    alimentacao (R$ 600), transporte (R$ 400) e hospedagem (R$ 500).
+
+    Regras:
+      - No banco saira 1 debito; internamente e distribuido entre N ItemDespesa filhos.
+      - valor_total_brl = SUM(itens_despesa.valor_brl).
+      - Conciliacao 1:1 com uma TransacaoBancaria OFX.
+      - Ao conciliar, todos os ItemDespesa filhos sao marcados conciliados em cascata.
+    """
+    __tablename__ = "reembolsos"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    beneficiario = Column(String(200), nullable=False)
+    data_pagamento = Column(Date, nullable=False)
+    valor_total_brl = Column(Numeric(14, 2), nullable=False)
+    transacao_bancaria_id = Column(
+        Integer,
+        ForeignKey("transacoes_bancarias.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="Debito OFX vinculado ao reembolso (quando conciliado)",
+    )
+    conciliado = Column(Boolean, default=False, nullable=False)
+    observacao = Column(Text, default="")
+    data_criacao = Column(DateTime, default=func.now())
+
+    # Relacionamentos
+    transacao_bancaria = relationship(
+        "TransacaoBancaria", foreign_keys=[transacao_bancaria_id],
+    )
+    itens_despesa = relationship(
+        "ItemDespesa",
+        back_populates="reembolso",
+        cascade="all, delete-orphan",
+        lazy="select",
+    )
+
+    def __repr__(self):
+        status = "conciliado" if self.conciliado else "pendente"
+        return f"<Reembolso {self.beneficiario} – R${self.valor_total_brl} ({status})>"

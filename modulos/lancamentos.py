@@ -144,15 +144,29 @@ def _aba_novo(session):
 
     with st.form("form_lancamento", clear_on_submit=True):
         col1, col2 = st.columns(2)
-        data_desp = col1.date_input("Data *", value=date.today(), key="lanc_data")
+        fornecedor = col1.text_input(
+            "Fornecedor/Cliente *", max_chars=200,
+            placeholder="Ex: Papelaria Central",
+            key="lanc_fornecedor",
+        )
         cat_sel = col2.selectbox("Categoria *", list(opcoes_cat.keys()), key="lanc_cat")
 
         col3, col4 = st.columns(2)
-        valor = col3.number_input(
+        data_emissao = col3.date_input(
+            "Data de Emissao *", value=date.today(), key="lanc_data_emissao",
+            help="Data da nota/documento",
+        )
+        data_pagamento = col4.date_input(
+            "Data de Pagamento *", value=date.today(), key="lanc_data_pagamento",
+            help="Data em que saiu (ou vai sair) do banco",
+        )
+
+        col5, col6 = st.columns(2)
+        valor = col5.number_input(
             "Valor (R$) *", min_value=0.01, step=10.0,
             format="%.2f", key="lanc_valor",
         )
-        descricao = col4.text_input(
+        descricao = col6.text_input(
             "Descricao *", max_chars=255,
             placeholder="Ex: Compra de materiais escritorio",
             key="lanc_desc",
@@ -163,7 +177,7 @@ def _aba_novo(session):
         recorrente = st.checkbox("Lancamento recorrente?", key="lanc_recorrente")
 
         freq = "MENSAL"
-        data_inicio_rec = data_desp
+        data_inicio_rec = data_pagamento
         data_fim_rec = date(2027, 12, 31)
 
         if recorrente:
@@ -184,11 +198,13 @@ def _aba_novo(session):
     if enviar:
         if not descricao.strip():
             st.error("Descricao e obrigatoria.")
+        elif not fornecedor.strip():
+            st.error("Fornecedor/Cliente e obrigatorio.")
         else:
             cat_id = opcoes_cat[cat_sel]
 
-            # Verifica teto da categoria
-            alerta = _verificar_teto_categoria(session, cat_id, valor, data_desp)
+            # Verifica teto da categoria (usa data de pagamento como referencia)
+            alerta = _verificar_teto_categoria(session, cat_id, valor, data_pagamento)
             if alerta:
                 tipo_alerta, msg = alerta
                 if tipo_alerta == "error":
@@ -202,7 +218,10 @@ def _aba_novo(session):
                 categoria_despesa_id=cat_id,
                 valor_brl=_to_decimal(valor),
                 descricao=descricao.strip(),
-                data=data_desp,
+                fornecedor_cliente=fornecedor.strip(),
+                data=data_pagamento,
+                data_emissao=data_emissao,
+                data_pagamento=data_pagamento,
                 conciliado=False,
             )
             session.add(item)
@@ -247,7 +266,7 @@ def _aba_lista(session):
         session.query(ItemDespesa)
         .join(CategoriaDespesa)
         .join(CentroCusto)
-        .order_by(ItemDespesa.data.desc())
+        .order_by(ItemDespesa.data_pagamento.desc().nullslast(), ItemDespesa.data.desc())
     )
 
     if filtro == "Nao conciliados":
@@ -265,11 +284,16 @@ def _aba_lista(session):
     dados = []
     for item in itens:
         cat = item.categoria_despesa
+        data_pag = item.data_pagamento or item.data
+        data_emi = item.data_emissao
         dados.append({
             "ID": item.id,
-            "Data": str(item.data),
+            "Fornecedor/Cliente": item.fornecedor_cliente or "—",
+            "Data Emissao": str(data_emi) if data_emi else "—",
+            "Data Pagamento": str(data_pag) if data_pag else "—",
             "Descricao": item.descricao or "—",
-            "Categoria": f"{cat.centro_custo.codigo} | {cat.nome}",
+            "Centro de Custo": cat.centro_custo.codigo,
+            "Categoria": cat.nome,
             "Valor": f"R$ {item.valor_brl:,.2f}",
             "Status": "Conciliado" if item.conciliado else "Pendente",
         })
@@ -296,7 +320,8 @@ def _aba_lista(session):
     st.markdown("**Editar ou Excluir** (somente lancamentos nao conciliados)")
 
     opcoes = {
-        f"#{i.id} | {i.data} | {i.descricao[:40]} | R$ {i.valor_brl:,.2f}": i.id
+        f"#{i.id} | {i.data_pagamento or i.data} | {(i.fornecedor_cliente or '—')[:30]} | "
+        f"{(i.descricao or '')[:30]} | R$ {i.valor_brl:,.2f}": i.id
         for i in itens_editaveis
     }
     sel = st.selectbox("Selecione o lancamento", list(opcoes.keys()), key="sel_lanc_edit")
@@ -308,38 +333,62 @@ def _aba_lista(session):
     col_ed, col_del = st.columns([3, 1])
 
     with col_ed:
-        with st.form("form_lanc_edit"):
-            data_ed = st.date_input("Data", value=item_obj.data, key="lanc_data_ed")
+        with st.form(f"form_lanc_edit_{item_id}"):
+            fornecedor_ed = st.text_input(
+                "Fornecedor/Cliente",
+                value=item_obj.fornecedor_cliente or "",
+                max_chars=200,
+                key=f"lanc_fornecedor_ed_{item_id}",
+            )
+
+            col_de1, col_de2 = st.columns(2)
+            data_emissao_ed = col_de1.date_input(
+                "Data de Emissao",
+                value=item_obj.data_emissao or item_obj.data_pagamento or item_obj.data,
+                key=f"lanc_data_emissao_ed_{item_id}",
+            )
+            data_pag_ed = col_de2.date_input(
+                "Data de Pagamento",
+                value=item_obj.data_pagamento or item_obj.data,
+                key=f"lanc_data_pag_ed_{item_id}",
+            )
 
             cat_atual = f"{item_obj.categoria_despesa.centro_custo.codigo} | {item_obj.categoria_despesa.nome}"
             idx_cat = list(opcoes_cat.keys()).index(cat_atual) if cat_atual in opcoes_cat else 0
             cat_ed = st.selectbox(
                 "Categoria", list(opcoes_cat.keys()),
-                index=idx_cat, key="lanc_cat_ed",
+                index=idx_cat, key=f"lanc_cat_ed_{item_id}",
             )
 
             col_ve, col_de = st.columns(2)
             valor_ed = col_ve.number_input(
                 "Valor (R$)", value=float(item_obj.valor_brl),
-                min_value=0.01, step=10.0, format="%.2f", key="lanc_valor_ed",
+                min_value=0.01, step=10.0, format="%.2f",
+                key=f"lanc_valor_ed_{item_id}",
             )
             desc_ed = col_de.text_input(
                 "Descricao", value=item_obj.descricao or "",
-                key="lanc_desc_ed",
+                key=f"lanc_desc_ed_{item_id}",
             )
             salvar = st.form_submit_button("Atualizar")
 
         if salvar:
-            item_obj.data = data_ed
-            item_obj.categoria_despesa_id = opcoes_cat[cat_ed]
-            item_obj.valor_brl = _to_decimal(valor_ed)
-            item_obj.descricao = desc_ed.strip()
-            session.commit()
-            st.success("Lancamento atualizado!")
-            st.rerun()
+            if not fornecedor_ed.strip():
+                st.error("Fornecedor/Cliente e obrigatorio.")
+            else:
+                item_obj.fornecedor_cliente = fornecedor_ed.strip()
+                item_obj.data_emissao = data_emissao_ed
+                item_obj.data_pagamento = data_pag_ed
+                item_obj.data = data_pag_ed
+                item_obj.categoria_despesa_id = opcoes_cat[cat_ed]
+                item_obj.valor_brl = _to_decimal(valor_ed)
+                item_obj.descricao = desc_ed.strip()
+                session.commit()
+                st.success("Lancamento atualizado!")
+                st.rerun()
 
     with col_del:
-        if st.button("Excluir", type="primary", key="btn_del_lanc"):
+        if st.button("Excluir", type="primary", key=f"btn_del_lanc_{item_id}"):
             session.delete(item_obj)
             session.commit()
             st.success("Lancamento excluido!")

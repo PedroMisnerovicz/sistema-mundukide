@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import sessionmaker, Session
 from pathlib import Path
 
@@ -39,21 +39,39 @@ def get_session() -> Session:
     return SessionLocal()
 
 
+def _colunas(conn, tabela: str) -> set:
+    """Retorna o conjunto de colunas de uma tabela (compativel SQLite/PostgreSQL)."""
+    if _is_sqlite:
+        result = conn.execute(text(f"PRAGMA table_info({tabela})"))
+        return {row[1] for row in result.fetchall()}
+    result = conn.execute(text(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = :t"
+    ), {"t": tabela})
+    return {row[0] for row in result.fetchall()}
+
+
+def _tabela_existe(conn, tabela: str) -> bool:
+    """Verifica se uma tabela existe (compativel SQLite/PostgreSQL)."""
+    if _is_sqlite:
+        result = conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=:t"
+        ), {"t": tabela})
+    else:
+        result = conn.execute(text(
+            "SELECT table_name FROM information_schema.tables WHERE table_name=:t"
+        ), {"t": tabela})
+    return result.fetchone() is not None
+
+
 def _apply_migrations():
-    """Adiciona colunas novas em tabelas existentes (ALTER TABLE).
+    """Adiciona colunas novas em tabelas existentes (ALTER TABLE) e faz backfills.
+    Idempotente — pode rodar toda vez sem quebrar.
     Funciona tanto para SQLite quanto para PostgreSQL."""
     try:
         with engine.connect() as conn:
-            if _is_sqlite:
-                result = conn.execute(text("PRAGMA table_info(categorias_despesa)"))
-                cols = {row[1] for row in result.fetchall()}
-            else:
-                result = conn.execute(text(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name = 'categorias_despesa'"
-                ))
-                cols = {row[0] for row in result.fetchall()}
-
+            # ── categorias_despesa ───────────────────────────
+            cols = _colunas(conn, "categorias_despesa")
             if "teto_brl" not in cols:
                 conn.execute(text(
                     "ALTER TABLE categorias_despesa ADD COLUMN teto_brl NUMERIC(14,2)"
@@ -67,19 +85,41 @@ def _apply_migrations():
                     "ALTER TABLE categorias_despesa ADD COLUMN teto_eur NUMERIC(14,2)"
                 ))
 
-            if _is_sqlite:
-                result = conn.execute(text("PRAGMA table_info(tecnicos)"))
-                cols_tec = {row[1] for row in result.fetchall()}
-            else:
-                result = conn.execute(text(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name = 'tecnicos'"
-                ))
-                cols_tec = {row[0] for row in result.fetchall()}
-
+            # ── tecnicos ─────────────────────────────────────
+            cols_tec = _colunas(conn, "tecnicos")
             if "custo_maximo" not in cols_tec:
                 conn.execute(text(
                     "ALTER TABLE tecnicos ADD COLUMN custo_maximo NUMERIC(14,2)"
+                ))
+
+            # ── itens_despesa (Fase 1 do refactor) ───────────
+            if _tabela_existe(conn, "itens_despesa"):
+                cols_item = _colunas(conn, "itens_despesa")
+                if "fornecedor_cliente" not in cols_item:
+                    conn.execute(text(
+                        "ALTER TABLE itens_despesa ADD COLUMN fornecedor_cliente VARCHAR(200)"
+                    ))
+                if "data_emissao" not in cols_item:
+                    conn.execute(text(
+                        "ALTER TABLE itens_despesa ADD COLUMN data_emissao DATE"
+                    ))
+                if "data_pagamento" not in cols_item:
+                    conn.execute(text(
+                        "ALTER TABLE itens_despesa ADD COLUMN data_pagamento DATE"
+                    ))
+                if "reembolso_id" not in cols_item:
+                    conn.execute(text(
+                        "ALTER TABLE itens_despesa ADD COLUMN reembolso_id INTEGER"
+                    ))
+                if "lancamento_recorrente_id" not in cols_item:
+                    conn.execute(text(
+                        "ALTER TABLE itens_despesa ADD COLUMN lancamento_recorrente_id INTEGER"
+                    ))
+
+                # Backfill: data_pagamento = data para registros antigos
+                conn.execute(text(
+                    "UPDATE itens_despesa SET data_pagamento = data "
+                    "WHERE data_pagamento IS NULL AND data IS NOT NULL"
                 ))
 
             conn.commit()

@@ -112,14 +112,16 @@ def _aba_debitos_pendentes(session):
         st.warning("Cadastre categorias de despesa antes de conciliar.")
         return
 
-    # Lancamentos manuais nao conciliados (disponiveis para match)
+    # Lancamentos manuais nao conciliados (disponiveis para match).
+    # Exclui itens que ja fazem parte de um Reembolso.
     manuais_disponiveis = (
         session.query(ItemDespesa)
         .filter(
             ItemDespesa.conciliado == False,
             ItemDespesa.transacao_bancaria_id == None,
+            ItemDespesa.reembolso_id == None,
         )
-        .order_by(ItemDespesa.data)
+        .order_by(ItemDespesa.data_pagamento.asc().nullslast(), ItemDespesa.data)
         .all()
     )
 
@@ -146,6 +148,7 @@ def _aba_debitos_pendentes(session):
                 for s in splits_existentes:
                     cat = s.categoria_despesa
                     dados_splits.append({
+                        "Fornecedor/Cliente": s.fornecedor_cliente or "—",
                         "Categoria": f"{cat.centro_custo.codigo} | {cat.nome}",
                         "Valor": f"R$ {s.valor_brl:,.2f}",
                         "Descricao": s.descricao or "—",
@@ -187,8 +190,10 @@ def _aba_debitos_pendentes(session):
                 if manuais_para_tx:
                     st.markdown("**Vincular lancamento manual existente:**")
                     opcoes_manuais = {
-                        f"#{m.id} | {m.data} | {m.categoria_despesa.centro_custo.codigo}|"
-                        f"{m.categoria_despesa.nome} | R$ {m.valor_brl:,.2f} | {m.descricao[:30]}": m.id
+                        f"#{m.id} | {m.data_pagamento or m.data} | "
+                        f"{(m.fornecedor_cliente or '—')[:25]} | "
+                        f"{m.categoria_despesa.centro_custo.codigo}|{m.categoria_despesa.nome} | "
+                        f"R$ {m.valor_brl:,.2f} | {(m.descricao or '')[:30]}": m.id
                         for m in manuais_para_tx
                     }
                     sel_manual = st.selectbox(
@@ -201,6 +206,8 @@ def _aba_debitos_pendentes(session):
                         manual_obj = session.get(ItemDespesa, manual_id)
                         manual_obj.transacao_bancaria_id = tx.id
                         manual_obj.conciliado = True
+                        # Atualiza data de pagamento com a data real do debito
+                        manual_obj.data_pagamento = tx.data
                         session.commit()
                         st.success("Lancamento manual vinculado!")
                         st.rerun()
@@ -244,6 +251,7 @@ def _aba_debitos_pendentes(session):
                             valor_brl=val_dec,
                             descricao=desc_split.strip(),
                             data=tx.data,
+                            data_pagamento=tx.data,
                             conciliado=False,
                         )
                         session.add(novo_item)
@@ -418,6 +426,7 @@ def _aba_conciliadas(session):
             for s in tx.itens_despesa:
                 cat = s.categoria_despesa
                 dados.append({
+                    "Fornecedor/Cliente": s.fornecedor_cliente or "—",
                     "Centro de Custo": cat.centro_custo.codigo,
                     "Categoria": cat.nome,
                     "Valor": f"R$ {s.valor_brl:,.2f}",
