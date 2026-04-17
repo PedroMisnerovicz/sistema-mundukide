@@ -615,9 +615,14 @@ def _gerar_xlsx_financiador(session, cambio):
         valor_brl = -float(item.valor_brl)
         valor_eur = (valor_brl / cambio_f) if cambio_f else 0.0
 
+        descricao = item.descricao or ""
+        if item.reembolso and item.reembolso.beneficiario:
+            sufixo = f"Reembolso {item.reembolso.beneficiario}"
+            descricao = f"{descricao} - {sufixo}" if descricao else sufixo
+
         linhas.append({
             "C_CREATED_DATE": data_ref,
-            "C_DESCRIPTION": item.descricao or "",
+            "C_DESCRIPTION": descricao,
             "C_CONTRACT": "M349BN1-BR",
             "C_ACCOUNT": f"{cc.codigo} {cat.nome}",
             "C_TAGS": "",
