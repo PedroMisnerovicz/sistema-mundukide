@@ -14,7 +14,14 @@ import streamlit as st
 from sqlalchemy import func as sqlfunc
 
 from database import get_session
-from models import CentroCusto, CategoriaDespesa, ItemDespesa, LancamentoRecorrente, Remessa
+from models import (
+    CentroCusto,
+    CategoriaDespesa,
+    ItemDespesa,
+    LancamentoRecorrente,
+    Reembolso,
+    Remessa,
+)
 
 CAMBIO_PROJECAO = Decimal("6.00")
 
@@ -66,9 +73,10 @@ def render():
         session.close()
         return
 
-    tab_novo, tab_lista, tab_recorrentes = st.tabs([
+    tab_novo, tab_lista, tab_reemb, tab_recorrentes = st.tabs([
         "Novo Lancamento",
         "Lancamentos Registrados",
+        "Reembolsos",
         "Lancamentos Recorrentes",
     ])
 
@@ -77,6 +85,9 @@ def render():
 
     with tab_lista:
         _aba_lista(session)
+
+    with tab_reemb:
+        _aba_reembolsos(session)
 
     with tab_recorrentes:
         _aba_recorrentes(session)
@@ -266,6 +277,7 @@ def _aba_lista(session):
         session.query(ItemDespesa)
         .join(CategoriaDespesa)
         .join(CentroCusto)
+        .filter(ItemDespesa.reembolso_id == None)
         .order_by(ItemDespesa.data_pagamento.desc().nullslast(), ItemDespesa.data.desc())
     )
 
@@ -393,6 +405,397 @@ def _aba_lista(session):
             session.commit()
             st.success("Lancamento excluido!")
             st.rerun()
+
+
+# ──────────────── aba: reembolsos ──────────────────────────
+
+_REEMB_ITENS_KEY = "reemb_novo_itens"  # lista de dicts em session_state
+
+
+def _aba_reembolsos(session):
+    st.subheader("Reembolsos")
+    st.caption(
+        "Um reembolso agrupa varias despesas pagas a uma mesma pessoa em um unico debito bancario. "
+        "As despesas internas continuam somando nos centros de custo e categorias corretos."
+    )
+
+    sub_novo, sub_lista = st.tabs(["Novo Reembolso", "Reembolsos Registrados"])
+
+    with sub_novo:
+        _reemb_novo(session)
+
+    with sub_lista:
+        _reemb_lista(session)
+
+
+def _reemb_novo(session):
+    """Formulario para criar um reembolso com N despesas internas."""
+    opcoes_cat = _opcoes_categorias(session)
+    if not opcoes_cat:
+        st.warning("Cadastre categorias de despesa antes de criar reembolsos.")
+        return
+
+    # Cabecalho do reembolso
+    col1, col2 = st.columns(2)
+    beneficiario = col1.text_input(
+        "Beneficiario *", max_chars=200,
+        placeholder="Ex: Joao Silva",
+        key="reemb_beneficiario",
+    )
+    data_pag = col2.date_input(
+        "Data de Pagamento *", value=date.today(),
+        key="reemb_data_pag",
+        help="Data em que o debito saiu (ou vai sair) do banco",
+    )
+    observacao = st.text_area(
+        "Observacao (opcional)", max_chars=500,
+        key="reemb_obs", height=70,
+    )
+
+    st.markdown("---")
+    st.markdown("**Despesas do Reembolso**")
+
+    # Inicializa acumulador de itens
+    if _REEMB_ITENS_KEY not in st.session_state:
+        st.session_state[_REEMB_ITENS_KEY] = []
+
+    itens = st.session_state[_REEMB_ITENS_KEY]
+
+    # Formulario para adicionar uma despesa
+    with st.form("form_reemb_add_item", clear_on_submit=True):
+        col_a, col_b = st.columns(2)
+        forn_item = col_a.text_input(
+            "Fornecedor/Cliente",
+            value=beneficiario,
+            max_chars=200,
+            placeholder="Pre-preenchido com o beneficiario — edite se necessario",
+            key="reemb_item_forn",
+        )
+        cat_item = col_b.selectbox(
+            "Categoria *", list(opcoes_cat.keys()), key="reemb_item_cat",
+        )
+
+        col_c, col_d = st.columns(2)
+        valor_item = col_c.number_input(
+            "Valor (R$) *", min_value=0.01, step=10.0,
+            format="%.2f", key="reemb_item_valor",
+        )
+        data_emi_item = col_d.date_input(
+            "Data de Emissao *", value=date.today(),
+            key="reemb_item_data_emi",
+        )
+
+        desc_item = st.text_input(
+            "Descricao", max_chars=255,
+            placeholder="Ex: Almoco com cliente",
+            key="reemb_item_desc",
+        )
+
+        adicionar = st.form_submit_button("Adicionar Despesa")
+
+    if adicionar:
+        if not cat_item:
+            st.error("Selecione uma categoria.")
+        elif valor_item <= 0:
+            st.error("Valor deve ser maior que zero.")
+        else:
+            itens.append({
+                "fornecedor": (forn_item or beneficiario or "").strip(),
+                "cat_label": cat_item,
+                "cat_id": opcoes_cat[cat_item],
+                "valor": _to_decimal(valor_item),
+                "data_emissao": data_emi_item,
+                "descricao": (desc_item or "").strip(),
+            })
+            st.session_state[_REEMB_ITENS_KEY] = itens
+            st.rerun()
+
+    # Tabela dos itens acumulados
+    if itens:
+        st.markdown("**Itens adicionados:**")
+        for idx, it in enumerate(itens):
+            col_n, col_v, col_x = st.columns([5, 2, 1])
+            col_n.write(
+                f"**{it['fornecedor'] or '—'}** — {it['cat_label']} | "
+                f"emissao: {it['data_emissao']}"
+                + (f" | {it['descricao']}" if it['descricao'] else "")
+            )
+            col_v.write(f"R$ {it['valor']:,.2f}")
+            if col_x.button("Remover", key=f"reemb_rm_{idx}"):
+                itens.pop(idx)
+                st.session_state[_REEMB_ITENS_KEY] = itens
+                st.rerun()
+
+        total = sum((it["valor"] for it in itens), Decimal("0.00"))
+        st.markdown("---")
+        st.metric("Total do Reembolso", f"R$ {total:,.2f}")
+    else:
+        st.info("Adicione pelo menos uma despesa para salvar o reembolso.")
+
+    # Botao final
+    col_salvar, col_limpar, _ = st.columns([1, 1, 3])
+    with col_salvar:
+        salvar = st.button(
+            "Salvar Reembolso", type="primary",
+            disabled=not itens or not beneficiario.strip(),
+            key="btn_reemb_salvar",
+        )
+    with col_limpar:
+        if st.button("Limpar lista", key="btn_reemb_limpar", disabled=not itens):
+            st.session_state[_REEMB_ITENS_KEY] = []
+            st.rerun()
+
+    if salvar:
+        if not beneficiario.strip():
+            st.error("Beneficiario e obrigatorio.")
+            return
+        if not itens:
+            st.error("Adicione pelo menos uma despesa.")
+            return
+
+        total = sum((it["valor"] for it in itens), Decimal("0.00"))
+
+        # Transacao atomica: cria Reembolso + ItemDespesa filhos
+        try:
+            reembolso = Reembolso(
+                beneficiario=beneficiario.strip(),
+                data_pagamento=data_pag,
+                valor_total_brl=total,
+                conciliado=False,
+                observacao=(observacao or "").strip(),
+            )
+            session.add(reembolso)
+            session.flush()  # garante reembolso.id
+
+            for it in itens:
+                item = ItemDespesa(
+                    categoria_despesa_id=it["cat_id"],
+                    reembolso_id=reembolso.id,
+                    valor_brl=it["valor"],
+                    descricao=it["descricao"],
+                    fornecedor_cliente=it["fornecedor"],
+                    data=data_pag,
+                    data_emissao=it["data_emissao"],
+                    data_pagamento=data_pag,
+                    conciliado=False,
+                )
+                session.add(item)
+
+            session.commit()
+            st.session_state[_REEMB_ITENS_KEY] = []
+            st.success(
+                f"Reembolso de R$ {total:,.2f} para '{beneficiario.strip()}' "
+                f"registrado com {len(itens)} despesa(s)."
+            )
+            st.rerun()
+        except Exception as e:
+            session.rollback()
+            st.error(f"Erro ao salvar reembolso: {e}")
+
+
+def _reemb_lista(session):
+    """Listagem de reembolsos com expansao de itens e acoes."""
+    filtro = st.radio(
+        "Filtrar",
+        ["Todos", "Pendentes", "Conciliados"],
+        horizontal=True,
+        key="filtro_reemb",
+    )
+
+    query = session.query(Reembolso).order_by(Reembolso.data_pagamento.desc())
+    if filtro == "Pendentes":
+        query = query.filter(Reembolso.conciliado == False)
+    elif filtro == "Conciliados":
+        query = query.filter(Reembolso.conciliado == True)
+
+    reembolsos = query.all()
+
+    if not reembolsos:
+        st.info("Nenhum reembolso encontrado.")
+        return
+
+    # Metricas
+    total_valor = sum((r.valor_total_brl for r in reembolsos), Decimal("0.00"))
+    n_pend = sum(1 for r in reembolsos if not r.conciliado)
+    n_conc = sum(1 for r in reembolsos if r.conciliado)
+    col_m1, col_m2, col_m3 = st.columns(3)
+    col_m1.metric("Total", f"R$ {total_valor:,.2f}")
+    col_m2.metric("Pendentes", n_pend)
+    col_m3.metric("Conciliados", n_conc)
+
+    st.markdown("---")
+
+    opcoes_cat = _opcoes_categorias(session)
+
+    for r in reembolsos:
+        icone = "✅" if r.conciliado else "⏳"
+        label = (
+            f"{icone} {r.data_pagamento} | {r.beneficiario} | "
+            f"R$ {r.valor_total_brl:,.2f} | {len(r.itens_despesa)} item(ns)"
+        )
+
+        with st.expander(label, expanded=False):
+            if r.observacao:
+                st.caption(r.observacao)
+
+            # Tabela de itens filhos
+            dados = []
+            for it in r.itens_despesa:
+                cat = it.categoria_despesa
+                dados.append({
+                    "Fornecedor/Cliente": it.fornecedor_cliente or "—",
+                    "Centro de Custo": cat.centro_custo.codigo,
+                    "Categoria": cat.nome,
+                    "Descricao": it.descricao or "—",
+                    "Data Emissao": str(it.data_emissao) if it.data_emissao else "—",
+                    "Valor": f"R$ {it.valor_brl:,.2f}",
+                })
+            st.dataframe(
+                pd.DataFrame(dados),
+                use_container_width=True, hide_index=True,
+            )
+
+            if r.conciliado:
+                st.success(
+                    f"Reembolso conciliado ao debito bancario "
+                    f"#{r.transacao_bancaria_id} — para desfazer, use a tela de Conciliacao."
+                )
+                continue
+
+            # Edicao (cabecalho) + gestao dos itens — apenas para nao conciliados
+            st.markdown("---")
+            st.markdown("**Editar cabecalho:**")
+            with st.form(f"form_reemb_edit_{r.id}"):
+                col_e1, col_e2 = st.columns(2)
+                benef_ed = col_e1.text_input(
+                    "Beneficiario", value=r.beneficiario,
+                    max_chars=200, key=f"reemb_benef_ed_{r.id}",
+                )
+                data_ed = col_e2.date_input(
+                    "Data de Pagamento", value=r.data_pagamento,
+                    key=f"reemb_data_ed_{r.id}",
+                )
+                obs_ed = st.text_area(
+                    "Observacao", value=r.observacao or "",
+                    max_chars=500, height=60,
+                    key=f"reemb_obs_ed_{r.id}",
+                )
+                atualizar = st.form_submit_button("Atualizar cabecalho")
+
+            if atualizar:
+                if not benef_ed.strip():
+                    st.error("Beneficiario e obrigatorio.")
+                else:
+                    r.beneficiario = benef_ed.strip()
+                    r.data_pagamento = data_ed
+                    r.observacao = (obs_ed or "").strip()
+                    # Propaga data_pagamento para todos os filhos (mantem consistencia)
+                    for it in r.itens_despesa:
+                        it.data = data_ed
+                        it.data_pagamento = data_ed
+                    session.commit()
+                    st.success("Reembolso atualizado!")
+                    st.rerun()
+
+            # Adicionar nova despesa ao reembolso existente
+            st.markdown("---")
+            st.markdown("**Adicionar despesa a este reembolso:**")
+            with st.form(f"form_reemb_add_item_ex_{r.id}"):
+                col_ai1, col_ai2 = st.columns(2)
+                forn_ai = col_ai1.text_input(
+                    "Fornecedor/Cliente", value=r.beneficiario,
+                    max_chars=200, key=f"reemb_ai_forn_{r.id}",
+                )
+                cat_ai = col_ai2.selectbox(
+                    "Categoria", list(opcoes_cat.keys()),
+                    key=f"reemb_ai_cat_{r.id}",
+                )
+                col_ai3, col_ai4 = st.columns(2)
+                valor_ai = col_ai3.number_input(
+                    "Valor (R$)", min_value=0.01, step=10.0,
+                    format="%.2f", key=f"reemb_ai_valor_{r.id}",
+                )
+                data_emi_ai = col_ai4.date_input(
+                    "Data de Emissao", value=r.data_pagamento,
+                    key=f"reemb_ai_data_emi_{r.id}",
+                )
+                desc_ai = st.text_input(
+                    "Descricao", max_chars=255,
+                    key=f"reemb_ai_desc_{r.id}",
+                )
+                add_ai = st.form_submit_button("Adicionar despesa")
+
+            if add_ai:
+                novo = ItemDespesa(
+                    categoria_despesa_id=opcoes_cat[cat_ai],
+                    reembolso_id=r.id,
+                    valor_brl=_to_decimal(valor_ai),
+                    descricao=(desc_ai or "").strip(),
+                    fornecedor_cliente=(forn_ai or r.beneficiario).strip(),
+                    data=r.data_pagamento,
+                    data_emissao=data_emi_ai,
+                    data_pagamento=r.data_pagamento,
+                    conciliado=False,
+                )
+                session.add(novo)
+                # Recalcula total
+                r.valor_total_brl = sum(
+                    (i.valor_brl for i in r.itens_despesa),
+                    Decimal("0.00"),
+                ) + _to_decimal(valor_ai)
+                session.commit()
+                st.success("Despesa adicionada ao reembolso!")
+                st.rerun()
+
+            # Remover despesa individual
+            if len(r.itens_despesa) > 1:
+                st.markdown("---")
+                st.markdown("**Remover despesa:**")
+                opcoes_rm = {
+                    f"{(it.fornecedor_cliente or '—')[:25]} | "
+                    f"{it.categoria_despesa.centro_custo.codigo}|{it.categoria_despesa.nome} | "
+                    f"R$ {it.valor_brl:,.2f}": it.id
+                    for it in r.itens_despesa
+                }
+                sel_rm = st.selectbox(
+                    "Despesa a remover",
+                    list(opcoes_rm.keys()),
+                    key=f"reemb_rm_sel_{r.id}",
+                )
+                if st.button("Remover despesa", key=f"reemb_rm_btn_{r.id}"):
+                    item_rm = session.get(ItemDespesa, opcoes_rm[sel_rm])
+                    valor_rm = item_rm.valor_brl
+                    session.delete(item_rm)
+                    r.valor_total_brl = r.valor_total_brl - valor_rm
+                    session.commit()
+                    st.success("Despesa removida.")
+                    st.rerun()
+
+            # Excluir reembolso inteiro
+            st.markdown("---")
+            confirm_key = f"confirm_del_reemb_{r.id}"
+            if st.session_state.get(confirm_key, False):
+                st.warning(
+                    f"Confirma exclusao do reembolso e TODAS as {len(r.itens_despesa)} despesa(s)?"
+                )
+                col_yes, col_no = st.columns(2)
+                with col_yes:
+                    if st.button("Sim, excluir", type="primary",
+                                  key=f"btn_del_reemb_yes_{r.id}"):
+                        session.delete(r)
+                        session.commit()
+                        st.session_state.pop(confirm_key, None)
+                        st.success("Reembolso excluido.")
+                        st.rerun()
+                with col_no:
+                    if st.button("Cancelar", key=f"btn_del_reemb_no_{r.id}"):
+                        st.session_state.pop(confirm_key, None)
+                        st.rerun()
+            else:
+                if st.button("Excluir Reembolso", type="secondary",
+                              key=f"btn_del_reemb_{r.id}"):
+                    st.session_state[confirm_key] = True
+                    st.rerun()
 
 
 # ──────────────── aba: recorrentes ─────────────────────────

@@ -20,6 +20,7 @@ from models import (
     CentroCusto,
     CategoriaDespesa,
     ItemDespesa,
+    Reembolso,
     Remessa,
     TransacaoBancaria,
 )
@@ -180,6 +181,52 @@ def _aba_debitos_pendentes(session):
 
             if saldo > 0:
                 st.markdown("---")
+
+                # ─── Fluxo C: Vincular a Reembolso (valor exato) ───
+                # Apenas possivel quando nenhum split foi criado ainda (saldo == valor total)
+                if not splits_existentes:
+                    reembolsos_compat = (
+                        session.query(Reembolso)
+                        .filter(
+                            Reembolso.conciliado == False,
+                            Reembolso.transacao_bancaria_id == None,
+                            Reembolso.valor_total_brl == valor_abs,
+                        )
+                        .order_by(Reembolso.data_pagamento.desc())
+                        .all()
+                    )
+
+                    if reembolsos_compat:
+                        st.markdown("**Vincular a Reembolso (valor exato):**")
+                        opcoes_reemb = {
+                            f"#{r.id} | {r.data_pagamento} | {r.beneficiario} | "
+                            f"R$ {r.valor_total_brl:,.2f} | {len(r.itens_despesa)} item(ns)": r.id
+                            for r in reembolsos_compat
+                        }
+                        sel_reemb = st.selectbox(
+                            "Reembolso disponivel",
+                            list(opcoes_reemb.keys()),
+                            key=f"sel_reemb_{tx.id}",
+                        )
+                        if st.button("Vincular este Reembolso", key=f"btn_vinc_reemb_{tx.id}"):
+                            reemb = session.get(Reembolso, opcoes_reemb[sel_reemb])
+                            # Cascateia conciliacao para o reembolso e todos os filhos
+                            reemb.transacao_bancaria_id = tx.id
+                            reemb.conciliado = True
+                            for it in reemb.itens_despesa:
+                                it.transacao_bancaria_id = tx.id
+                                it.conciliado = True
+                                it.data_pagamento = tx.data
+                                it.data = tx.data
+                            tx.conciliada = True
+                            session.commit()
+                            st.success(
+                                f"Reembolso de {reemb.beneficiario} vinculado! "
+                                f"{len(reemb.itens_despesa)} despesa(s) conciliada(s) em cascata."
+                            )
+                            st.rerun()
+
+                        st.markdown("---")
 
                 # ─── Fluxo A: Vincular lancamentos manuais ───
                 manuais_para_tx = [
@@ -421,17 +468,39 @@ def _aba_conciliadas(session):
 
     for tx in conciliadas:
         valor_abs = abs(tx.valor)
-        with st.expander(f"✅ {tx.data} | {tx.descricao} | R$ {valor_abs:,.2f}"):
+
+        # Identifica se esta transacao corresponde a um Reembolso conciliado
+        reembolso_vinc = (
+            session.query(Reembolso)
+            .filter(Reembolso.transacao_bancaria_id == tx.id)
+            .first()
+        )
+
+        titulo = f"✅ {tx.data} | {tx.descricao} | R$ {valor_abs:,.2f}"
+        if reembolso_vinc:
+            titulo += f" | Reembolso: {reembolso_vinc.beneficiario}"
+
+        with st.expander(titulo):
+            if reembolso_vinc:
+                st.info(
+                    f"Esta transacao esta vinculada ao Reembolso "
+                    f"de **{reembolso_vinc.beneficiario}** "
+                    f"({len(reembolso_vinc.itens_despesa)} despesa(s))."
+                )
+
             dados = []
             for s in tx.itens_despesa:
                 cat = s.categoria_despesa
+                origem = "Reembolso" if s.reembolso_id else (
+                    "Manual" if s.conciliado and not s.reembolso_id else "Split direto"
+                )
                 dados.append({
                     "Fornecedor/Cliente": s.fornecedor_cliente or "—",
                     "Centro de Custo": cat.centro_custo.codigo,
                     "Categoria": cat.nome,
                     "Valor": f"R$ {s.valor_brl:,.2f}",
                     "Descricao": s.descricao or "—",
-                    "Origem": "Manual" if s.conciliado else "Split direto",
+                    "Origem": origem,
                 })
             st.dataframe(
                 pd.DataFrame(dados),
@@ -439,6 +508,13 @@ def _aba_conciliadas(session):
             )
 
             if st.button("Desfazer Conciliacao", key=f"btn_desfazer_{tx.id}"):
+                if reembolso_vinc:
+                    # Reverte cascata do reembolso
+                    reembolso_vinc.transacao_bancaria_id = None
+                    reembolso_vinc.conciliado = False
+                    for it in reembolso_vinc.itens_despesa:
+                        it.transacao_bancaria_id = None
+                        it.conciliado = False
                 tx.conciliada = False
                 session.commit()
                 st.info("Conciliacao desfeita. A transacao voltou para pendentes.")
