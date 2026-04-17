@@ -624,7 +624,7 @@ def _gerar_xlsx_financiador(session, cambio):
             "C_CREATED_DATE": data_ref,
             "C_DESCRIPTION": descricao,
             "C_CONTRACT": "M349BN1-BR",
-            "C_ACCOUNT": f"{cc.codigo} {cat.nome}",
+            "C_ACCOUNT": cat.nome,
             "C_TAGS": "",
             "C_TAGS_IDS": "",
             "C_AMOUNT": round(valor_brl, 2),
