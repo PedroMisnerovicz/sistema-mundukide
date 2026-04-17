@@ -578,6 +578,74 @@ def _pdf_detalhamento(pdf, session, centros, cambio, lang):
         pdf.ln(5)
 
 
+def _gerar_xlsx_financiador(session, cambio):
+    """Exporta todas as despesas no formato exigido pelo financiador Mundukide.
+
+    Formato: 21 colunas fixas (C_CREATED_DATE ... C_COF_EURO).
+    Valores fixos: C_CONTRACT=M349, C_ACTIVITY=Programa Brasil,
+    C_USER=EXT BRAS FINAPOP, C_ORGANIZATION=Brasil Sul, C_COUNTRY=Brasil,
+    C_FINA/C_COFINA/C_EXPENSE_STATE="NO EXISTE".
+    C_RECEIPT/C_RECEIPT_PICTURE ficam em branco (nao armazenamos anexos).
+    Valor BRL sai com sinal negativo (despesa). EUR = BRL / cambio medio.
+    """
+    COLUNAS = [
+        "C_CREATED_DATE", "C_DESCRIPTION", "C_CONTRACT", "C_ACCOUNT",
+        "C_TAGS", "C_TAGS_IDS", "C_AMOUNT", "C_CURRENCY", "C_ACTIVITY",
+        "C_RECEIPT", "C_RECEIPT_PICTURE", "C_USER", "C_FINA", "C_COFINA",
+        "C_EXPENSE_STATE", "C_ID", "C_ORGANIZATION", "C_COUNTRY",
+        "C_EUR_EQUI", "C_FIN_EURO", "C_COF_EURO",
+    ]
+
+    itens = (
+        session.query(ItemDespesa)
+        .join(CategoriaDespesa)
+        .join(CentroCusto)
+        .order_by(
+            ItemDespesa.data_pagamento, ItemDespesa.data, ItemDespesa.id,
+        )
+        .all()
+    )
+
+    cambio_f = float(cambio) if cambio else 0.0
+    linhas = []
+    for item in itens:
+        cat = item.categoria_despesa
+        cc = cat.centro_custo
+        data_ref = item.data_pagamento or item.data
+        valor_brl = -float(item.valor_brl)
+        valor_eur = (valor_brl / cambio_f) if cambio_f else 0.0
+
+        linhas.append({
+            "C_CREATED_DATE": data_ref,
+            "C_DESCRIPTION": item.descricao or "",
+            "C_CONTRACT": "M349",
+            "C_ACCOUNT": f"{cc.codigo} {cat.nome}",
+            "C_TAGS": "",
+            "C_TAGS_IDS": "",
+            "C_AMOUNT": round(valor_brl, 2),
+            "C_CURRENCY": "BRL",
+            "C_ACTIVITY": "Programa Brasil",
+            "C_RECEIPT": "",
+            "C_RECEIPT_PICTURE": "",
+            "C_USER": "EXT BRAS, FINAPOP @finapop",
+            "C_FINA": "NO EXISTE",
+            "C_COFINA": "NO EXISTE",
+            "C_EXPENSE_STATE": "NO EXISTE",
+            "C_ID": item.id,
+            "C_ORGANIZATION": "Brasil Sul",
+            "C_COUNTRY": "Brasil",
+            "C_EUR_EQUI": round(valor_eur, 6),
+            "C_FIN_EURO": round(valor_eur, 6),
+            "C_COF_EURO": round(valor_eur, 6),
+        })
+
+    df = pd.DataFrame(linhas, columns=COLUNAS)
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Worksheet")
+    return buffer.getvalue()
+
+
 def _gerar_pdf(session, remessas, centros, cambio, total_gasto, idioma="pt"):
     """Gera relatorio PDF completo do dashboard."""
     pdf = FPDF(orientation="L", format="A4")
@@ -613,9 +681,11 @@ def render():
     cambio = _cambio_medio(session)
     total_gasto = _total_gasto_brl(session)
 
-    # Botao de exportacao PDF com selecao de idioma
-    col_exp1, col_exp_lang, col_exp2, _ = st.columns([1, 1, 1, 3])
-    with col_exp_lang:
+    # Botoes de exportacao (PDF + Excel Financiador)
+    col_lang, col_pdf, col_pdf_dl, col_xlsx, col_xlsx_dl, _ = st.columns(
+        [1, 1, 1, 1.2, 1, 1]
+    )
+    with col_lang:
         idioma_pdf = st.selectbox(
             "Idioma do PDF",
             ["Portugues", "Espanhol"],
@@ -623,7 +693,7 @@ def render():
         )
         lang_code = "pt" if idioma_pdf == "Portugues" else "es"
 
-    with col_exp1:
+    with col_pdf:
         if st.button("Exportar PDF", type="secondary"):
             with st.spinner("Gerando PDF com graficos..."):
                 pdf_bytes = _gerar_pdf(
@@ -633,12 +703,29 @@ def render():
             st.rerun()
 
     if "dashboard_pdf" in st.session_state:
-        with col_exp2:
+        with col_pdf_dl:
             st.download_button(
                 "Baixar PDF",
                 data=st.session_state["dashboard_pdf"],
                 file_name=f"dashboard_mundukide_{date.today().strftime('%Y%m%d')}.pdf",
                 mime="application/pdf",
+                type="primary",
+            )
+
+    with col_xlsx:
+        if st.button("Exportar Excel Financiador", type="secondary"):
+            with st.spinner("Gerando planilha no formato do financiador..."):
+                xlsx_bytes = _gerar_xlsx_financiador(session, cambio)
+                st.session_state["dashboard_xlsx"] = xlsx_bytes
+            st.rerun()
+
+    if "dashboard_xlsx" in st.session_state:
+        with col_xlsx_dl:
+            st.download_button(
+                "Baixar Excel",
+                data=st.session_state["dashboard_xlsx"],
+                file_name=f"expenses_{date.today().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
             )
 
