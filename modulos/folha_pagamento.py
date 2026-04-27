@@ -37,14 +37,15 @@ TABELA_INSS_2026 = [
 ]
 TETO_INSS_2026 = Decimal("8475.55")
 
-# IRRF — Tabela base vigente 2026
+# IRRF — Tabela progressiva mensal 2026
+# Fonte: tabela vigente em 2026 (atualizada conforme Lei 15.270/2025 e desconto simplificado mensal de R$ 607,20)
 # Base de calculo = salario - INSS empregado
 TABELA_IRRF_2026 = [
-    (Decimal("2259.20"), Decimal("0.00"),   Decimal("0.00")),
-    (Decimal("2826.65"), Decimal("0.075"),  Decimal("169.44")),
-    (Decimal("3751.05"), Decimal("0.15"),   Decimal("381.44")),
-    (Decimal("4664.68"), Decimal("0.225"),  Decimal("662.77")),
-    (Decimal("99999999"), Decimal("0.275"), Decimal("896.00")),
+    (Decimal("2428.80"), Decimal("0.00"),   Decimal("0.00")),
+    (Decimal("3302.70"), Decimal("0.075"),  Decimal("182.16")),
+    (Decimal("4236.33"), Decimal("0.15"),   Decimal("429.87")),
+    (Decimal("5251.41"), Decimal("0.225"),  Decimal("747.64")),
+    (Decimal("99999999"), Decimal("0.275"), Decimal("1010.27")),
 ]
 # Lei 15.270/2025: isencao total para salario bruto <= R$5.000
 # Reducao gradual entre R$5.000,01 e R$7.350
@@ -52,18 +53,20 @@ LIMITE_ISENCAO_IRRF = Decimal("5000.00")
 LIMITE_REDUCAO_IRRF = Decimal("7350.00")
 
 # Encargos patronais (Lucro Presumido)
-ALIQUOTA_INSS_PATRONAL = Decimal("0.20")  # 20%
-ALIQUOTA_FGTS = Decimal("0.08")           # 8%
-ALIQUOTA_PIS_FOLHA = Decimal("0.01")      # 1% sobre folha
+ALIQUOTA_INSS_PATRONAL = Decimal("0.20")   # 20%
+ALIQUOTA_FGTS = Decimal("0.08")            # 8%
+ALIQUOTA_PIS_FOLHA = Decimal("0.01")       # 1% sobre folha
+ALIQUOTA_TERCEIROS = Decimal("0.058")      # 5,8% (Sistema S: Sal-Educacao 2,5% + INCRA 0,2% + SESI 1,5% + SENAI 1,0% + SEBRAE 0,6%)
 
 
 # Fator multiplicador: salario_bruto * FATOR = custo_total
-# FATOR = 1 + INSS_PAT(0.20) + FGTS(0.08) + PIS(0.01) + FERIAS(4/36) + 13o(1/12)
+# FATOR = 1 + INSS_PAT(0.20) + FGTS(0.08) + PIS(0.01) + TERCEIROS(0.058) + FERIAS(4/36) + 13o(1/12)
 FATOR_CUSTO_TOTAL = (
     Decimal("1")
     + ALIQUOTA_INSS_PATRONAL
     + ALIQUOTA_FGTS
     + ALIQUOTA_PIS_FOLHA
+    + ALIQUOTA_TERCEIROS
     + Decimal("4") / Decimal("36")   # provisao ferias: (sal + 1/3) / 12
     + Decimal("1") / Decimal("12")   # provisao 13o: sal / 12
 )
@@ -88,6 +91,7 @@ TRADUCOES_FOLHA = {
         "inss_patronal": "INSS Patronal",
         "fgts": "FGTS",
         "pis": "PIS",
+        "terceiros": "Terceiros",
         "prov_ferias": "Prov. Ferias",
         "prov_13": "Prov. 13o",
         "total_descontos": "Total Descontos",
@@ -124,6 +128,7 @@ TRADUCOES_FOLHA = {
         "inss_patronal": "INSS Patronal",
         "fgts": "FGTS",
         "pis": "PIS",
+        "terceiros": "Terceros",
         "prov_ferias": "Prov. Vacaciones",
         "prov_13": "Prov. 13o",
         "total_descontos": "Total Descuentos",
@@ -214,6 +219,7 @@ def calcular_folha_tecnico(salario: Decimal) -> dict:
     irrf = calcular_irrf(salario, inss)
     fgts = _q2(salario * ALIQUOTA_FGTS)
     pis = _q2(salario * ALIQUOTA_PIS_FOLHA)
+    terceiros = _q2(salario * ALIQUOTA_TERCEIROS)
     inss_patronal = _q2(salario * ALIQUOTA_INSS_PATRONAL)
     prov_ferias = _q2(salario * Decimal("4") / Decimal("36"))  # (sal + 1/3) / 12
     prov_13 = _q2(salario / Decimal("12"))
@@ -225,12 +231,13 @@ def calcular_folha_tecnico(salario: Decimal) -> dict:
         "irrf": irrf,
         "fgts": fgts,
         "pis": pis,
+        "terceiros": terceiros,
         "inss_patronal": inss_patronal,
         "prov_ferias": prov_ferias,
         "prov_13": prov_13,
         "salario_liquido": liquido,
         "total_descontos": _q2(inss + irrf),
-        "total_encargos": _q2(inss_patronal + fgts + pis + prov_ferias + prov_13),
+        "total_encargos": _q2(inss_patronal + fgts + pis + terceiros + prov_ferias + prov_13),
     }
 
 
@@ -400,14 +407,14 @@ def _gerar_pdf_folha(session, idioma: str = "pt", ano_ref: int = None, mes_ref: 
     calc_cols = [
         t("tecnico"), t("salario_bruto"), t("inss"), t("irrf"),
         t("salario_liquido"), t("inss_patronal"), t("fgts"),
-        t("pis"), t("prov_ferias"), t("prov_13"),
+        t("pis"), t("terceiros"), t("prov_ferias"), t("prov_13"),
     ]
-    calc_w = [50, 28, 24, 24, 27, 27, 24, 21, 26, 26]
+    calc_w = [45, 26, 22, 22, 25, 25, 22, 18, 24, 24, 24]
 
     _pdf_table_header(pdf, calc_cols, calc_w)
 
     totais = {k: Decimal("0") for k in [
-        "salario_bruto", "inss", "irrf", "fgts", "pis",
+        "salario_bruto", "inss", "irrf", "fgts", "pis", "terceiros",
         "inss_patronal", "prov_ferias", "prov_13", "salario_liquido",
         "total_descontos", "total_encargos",
     ]}
@@ -430,6 +437,7 @@ def _gerar_pdf_folha(session, idioma: str = "pt", ano_ref: int = None, mes_ref: 
             _fmt(folha["inss_patronal"]),
             _fmt(folha["fgts"]),
             _fmt(folha["pis"]),
+            _fmt(folha["terceiros"]),
             _fmt(folha["prov_ferias"]),
             _fmt(folha["prov_13"]),
         ], calc_w)
@@ -447,6 +455,7 @@ def _gerar_pdf_folha(session, idioma: str = "pt", ano_ref: int = None, mes_ref: 
         _fmt(totais["inss_patronal"]),
         _fmt(totais["fgts"]),
         _fmt(totais["pis"]),
+        _fmt(totais["terceiros"]),
         _fmt(totais["prov_ferias"]),
         _fmt(totais["prov_13"]),
     ], calc_w, bold=True)
@@ -734,7 +743,7 @@ def _aba_calculo(session):
     st.caption(
         "Tabelas vigentes: INSS 2026 (Portaria MPS/MF 13/2026) | "
         "IRRF 2026 (Lei 15.270/2025 — isencao ate R$5.000) | "
-        "Empresa: Lucro Presumido"
+        "Empresa: Lucro Presumido | Terceiros (Sistema S): 5,8%"
     )
 
     nota_pdf = st.text_area(
@@ -751,7 +760,8 @@ def _aba_calculo(session):
     totais = {
         "salario_bruto": Decimal("0"), "inss": Decimal("0"),
         "irrf": Decimal("0"), "fgts": Decimal("0"),
-        "pis": Decimal("0"), "inss_patronal": Decimal("0"),
+        "pis": Decimal("0"), "terceiros": Decimal("0"),
+        "inss_patronal": Decimal("0"),
         "prov_ferias": Decimal("0"), "prov_13": Decimal("0"),
         "salario_liquido": Decimal("0"),
         "total_descontos": Decimal("0"), "total_encargos": Decimal("0"),
@@ -784,6 +794,7 @@ def _aba_calculo(session):
             "INSS Patronal": f"R$ {l['inss_patronal']:,.2f}",
             "FGTS": f"R$ {l['fgts']:,.2f}",
             "PIS": f"R$ {l['pis']:,.2f}",
+            "Terceiros": f"R$ {l['terceiros']:,.2f}",
             "Prov. Ferias": f"R$ {l['prov_ferias']:,.2f}",
             "Prov. 13o": f"R$ {l['prov_13']:,.2f}",
         })
@@ -836,8 +847,11 @@ def _aba_calculo(session):
 
     col7, col8, col9 = st.columns(3)
     col7.metric("PIS sobre Folha", f"R$ {totais['pis']:,.2f}")
-    col8.metric("Provisao Ferias", f"R$ {totais['prov_ferias']:,.2f}")
-    col9.metric("Provisao 13o", f"R$ {totais['prov_13']:,.2f}")
+    col8.metric("Terceiros (5,8%)", f"R$ {totais['terceiros']:,.2f}")
+    col9.metric("Provisao Ferias", f"R$ {totais['prov_ferias']:,.2f}")
+
+    col10, _, _ = st.columns(3)
+    col10.metric("Provisao 13o", f"R$ {totais['prov_13']:,.2f}")
 
     # Custo total mensal do projeto com pessoal
     custo_total = _q2(totais['salario_bruto'] + totais['total_encargos'])
@@ -911,6 +925,7 @@ def _aba_gerar_recorrentes(session):
         cat_inss_pat = st.selectbox("INSS Patronal", cat_keys, key="cat_inss_pat")
         cat_fgts = st.selectbox("FGTS", cat_keys, key="cat_fgts")
         cat_pis = st.selectbox("PIS sobre Folha", cat_keys, key="cat_pis")
+        cat_terceiros = st.selectbox("Terceiros (5,8%)", cat_keys, key="cat_terceiros")
         cat_ferias = st.selectbox("Provisao de Ferias", cat_keys, key="cat_ferias")
         cat_13 = st.selectbox("Provisao 13o Salario", cat_keys, key="cat_13")
 
@@ -963,6 +978,7 @@ def _aba_gerar_recorrentes(session):
                 (cat_inss_pat, folha["inss_patronal"], f"INSS Patronal - {t.nome}", dia_encargos),
                 (cat_fgts, folha["fgts"], f"FGTS - {t.nome}", dia_encargos),
                 (cat_pis, folha["pis"], f"PIS Folha - {t.nome}", dia_encargos),
+                (cat_terceiros, folha["terceiros"], f"Terceiros (5,8%) - {t.nome}", dia_encargos),
                 (cat_ferias, folha["prov_ferias"], f"Prov. Ferias - {t.nome}", dia_encargos),
                 (cat_13, folha["prov_13"], f"Prov. 13o - {t.nome}", dia_encargos),
             ]
