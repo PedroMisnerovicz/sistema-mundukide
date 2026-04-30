@@ -151,9 +151,17 @@ def _t(chave, idioma="pt"):
 # ───────────────────────── helpers ──────────────────────────
 
 def _cambio_medio(session) -> Decimal:
+    """Media ponderada dos cambios EFETIVADOS, ponderada pelo valor em EUR
+    de cada remessa recebida. Cai para o cambio de projecao (R$6,00) caso
+    nenhuma remessa tenha cambio efetivado registrado."""
     remessas = (
         session.query(Remessa)
-        .filter(Remessa.recebida == True)
+        .filter(
+            Remessa.recebida == True,
+            Remessa.cambio_efetivado.isnot(None),
+            Remessa.valor_eur.isnot(None),
+            Remessa.valor_brl.isnot(None),
+        )
         .all()
     )
     if not remessas:

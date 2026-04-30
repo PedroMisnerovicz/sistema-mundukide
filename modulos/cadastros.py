@@ -28,11 +28,17 @@ def _to_decimal(valor, fallback=Decimal("0.00")):
 
 
 def _cambio_medio(session) -> Decimal:
-    """Retorna o cambio medio ponderado das remessas recebidas,
-    ou o cambio de projecao (R$6,00) se nenhuma foi recebida."""
+    """Media ponderada dos cambios EFETIVADOS das remessas recebidas
+    (ponderada pelo valor em EUR). Cai para o cambio de projecao
+    (R$6,00) se nenhuma remessa tem cambio efetivado registrado."""
     remessas = (
         session.query(Remessa)
-        .filter(Remessa.recebida == True)
+        .filter(
+            Remessa.recebida == True,
+            Remessa.cambio_efetivado.isnot(None),
+            Remessa.valor_eur.isnot(None),
+            Remessa.valor_brl.isnot(None),
+        )
         .all()
     )
     if not remessas:
@@ -362,13 +368,12 @@ def _aba_remessas():
                     value=float(rem.cambio_efetivado) if rem.cambio_efetivado else 6.0,
                     min_value=0.0001, step=0.01, format="%.4f",
                     key=f"rem_cambio_{rem.numero}",
-                    disabled=not recebida,
+                    help="Preenchido somente se a remessa estiver marcada como recebida.",
                 )
                 data_rec = col4.date_input(
                     "Data de recebimento",
                     value=rem.data_recebimento or date.today(),
                     key=f"rem_data_{rem.numero}",
-                    disabled=not recebida,
                 )
 
                 obs = st.text_input(
