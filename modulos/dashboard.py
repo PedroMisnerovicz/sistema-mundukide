@@ -718,6 +718,38 @@ def _gerar_pdf(session, remessas, centros, cambio, total_gasto, idioma="pt"):
 def render():
     st.title("Dashboard")
 
+    # CSS: cards de metricas mais compactos para nao truncar valores longos
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stMetric"] {
+            background-color: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 12px 14px;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+        }
+        div[data-testid="stMetricLabel"] p {
+            font-size: 0.82rem !important;
+            color: #555 !important;
+            font-weight: 500 !important;
+        }
+        div[data-testid="stMetricValue"] {
+            font-size: 1.45rem !important;
+            font-weight: 600 !important;
+            line-height: 1.25 !important;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: clip;
+        }
+        div[data-testid="stMetricDelta"] {
+            font-size: 0.78rem !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     session = get_session()
 
     remessas = session.query(Remessa).order_by(Remessa.numero).all()
@@ -725,9 +757,9 @@ def render():
     cambio = _cambio_medio(session)
     total_gasto = _total_gasto_brl(session)
 
-    # Botoes de exportacao (PDF + Excel Financiador)
-    col_lang, col_pdf, col_pdf_dl, col_xlsx, col_xlsx_dl, _ = st.columns(
-        [1, 1, 1, 1.2, 1, 1]
+    # ─── Barra de exportacoes (layout compacto e alinhado) ───
+    col_lang, col_pdf, col_pdf_dl, col_xlsx, col_xlsx_dl = st.columns(
+        [1.6, 1.5, 1.3, 1.7, 1.3]
     )
     with col_lang:
         idioma_pdf = st.selectbox(
@@ -737,8 +769,12 @@ def render():
         )
         lang_code = "pt" if idioma_pdf == "Portugues" else "es"
 
+    # Espacador invisivel para alinhar botoes com o selectbox (que tem label)
+    botao_offset = '<div style="height: 1.7rem"></div>'
+
     with col_pdf:
-        if st.button("Exportar PDF", type="secondary"):
+        st.markdown(botao_offset, unsafe_allow_html=True)
+        if st.button("Exportar PDF", type="secondary", use_container_width=True):
             with st.spinner("Gerando PDF com graficos..."):
                 pdf_bytes = _gerar_pdf(
                     session, remessas, centros, cambio, total_gasto, lang_code,
@@ -746,33 +782,42 @@ def render():
                 st.session_state["dashboard_pdf"] = pdf_bytes
             st.rerun()
 
-    if "dashboard_pdf" in st.session_state:
-        with col_pdf_dl:
+    with col_pdf_dl:
+        if "dashboard_pdf" in st.session_state:
+            st.markdown(botao_offset, unsafe_allow_html=True)
             st.download_button(
                 "Baixar PDF",
                 data=st.session_state["dashboard_pdf"],
                 file_name=f"dashboard_mundukide_{date.today().strftime('%Y%m%d')}.pdf",
                 mime="application/pdf",
                 type="primary",
+                use_container_width=True,
             )
 
     with col_xlsx:
-        if st.button("Exportar Excel Financiador", type="secondary"):
+        st.markdown(botao_offset, unsafe_allow_html=True)
+        if st.button(
+            "Exportar Excel", type="secondary", use_container_width=True,
+            help="Planilha no formato exigido pelo financiador Mundukide",
+        ):
             with st.spinner("Gerando planilha no formato do financiador..."):
                 xlsx_bytes = _gerar_xlsx_financiador(session, cambio)
                 st.session_state["dashboard_xlsx"] = xlsx_bytes
             st.rerun()
 
-    if "dashboard_xlsx" in st.session_state:
-        with col_xlsx_dl:
+    with col_xlsx_dl:
+        if "dashboard_xlsx" in st.session_state:
+            st.markdown(botao_offset, unsafe_allow_html=True)
             st.download_button(
                 "Baixar Excel",
                 data=st.session_state["dashboard_xlsx"],
                 file_name=f"expenses_{date.today().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
+                use_container_width=True,
             )
 
+    st.markdown("<br>", unsafe_allow_html=True)
     _secao_metricas(session, remessas, cambio, total_gasto)
     st.markdown("---")
     _secao_termometro(remessas, cambio, total_gasto)
@@ -787,6 +832,19 @@ def render():
 
 
 # ────────────── secao 1: metricas gerais ────────────────────
+
+def _fmt_brl(v) -> str:
+    """Formata Decimal/float como BRL no padrao brasileiro: R$ 1.604.985,00"""
+    s = f"{float(v):,.2f}"  # ex: 1,604,985.00
+    s = s.replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {s}"
+
+
+def _fmt_eur(v) -> str:
+    s = f"{float(v):,.2f}"
+    s = s.replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"€ {s}"
+
 
 def _secao_metricas(session, remessas, cambio, total_gasto):
     st.subheader("Visao Geral do Projeto")
@@ -804,12 +862,15 @@ def _secao_metricas(session, remessas, cambio, total_gasto):
     saldo = total_recebido_brl - total_gasto
 
     col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Projeto (EUR)", f"EUR {total_eur:,.2f}")
-    col2.metric("Projeto (BRL)", f"R$ {total_brl:,.2f}")
-    col3.metric("Cambio Medio", f"R$ {cambio:,.4f}")
-    col4.metric("Total Gasto", f"R$ {total_gasto:,.2f}")
-    col5.metric("Saldo em Conta", f"R$ {saldo:,.2f}",
-                delta=f"{'Positivo' if saldo >= 0 else 'Negativo'}")
+    col1.metric("Projeto (EUR)", _fmt_eur(total_eur))
+    col2.metric("Projeto (BRL)", _fmt_brl(total_brl))
+    col3.metric("Cambio Medio", f"R$ {float(cambio):.4f}".replace(".", ","))
+    col4.metric("Total Gasto", _fmt_brl(total_gasto))
+    col5.metric(
+        "Saldo em Conta",
+        _fmt_brl(saldo),
+        delta=("Positivo" if saldo >= 0 else "Negativo"),
+    )
 
 
 # ──────── secao 2: termometro de liberacao (80%) ────────────
