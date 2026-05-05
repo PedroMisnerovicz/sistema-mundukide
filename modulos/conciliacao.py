@@ -143,17 +143,13 @@ def render():
         session.close()
         return
 
-    tab_debitos, tab_creditos, tab_conciliadas = st.tabs([
-        "Debitos Pendentes",
-        "Creditos (Entradas)",
+    tab_pendentes, tab_conciliadas = st.tabs([
+        "Pendentes",
         "Ja Conciliadas",
     ])
 
-    with tab_debitos:
-        _aba_debitos_pendentes(session)
-
-    with tab_creditos:
-        _aba_creditos(session)
+    with tab_pendentes:
+        _aba_pendentes(session)
 
     with tab_conciliadas:
         _aba_conciliadas(session)
@@ -161,10 +157,50 @@ def render():
     session.close()
 
 
+# ──────────────── aba: pendentes (creditos + debitos) ───────
+
+def _aba_pendentes(session):
+    """Aba unica com creditos e debitos ainda nao conciliados."""
+    n_creditos = (
+        session.query(TransacaoBancaria)
+        .filter(
+            TransacaoBancaria.tipo == "CREDIT",
+            TransacaoBancaria.conciliada == False,
+        )
+        .count()
+    )
+    n_debitos = (
+        session.query(TransacaoBancaria)
+        .filter(
+            TransacaoBancaria.tipo == "DEBIT",
+            TransacaoBancaria.conciliada == False,
+        )
+        .count()
+    )
+
+    if n_creditos == 0 and n_debitos == 0:
+        st.success("Nenhuma transacao pendente de conciliacao!")
+        return
+
+    col_a, col_b = st.columns(2)
+    col_a.metric("Creditos pendentes", n_creditos)
+    col_b.metric("Debitos pendentes", n_debitos)
+
+    st.markdown("---")
+
+    if n_creditos > 0:
+        st.markdown("### 💰 Creditos (Entradas / Remessas)")
+        _aba_creditos(session)
+        st.markdown("---")
+
+    if n_debitos > 0:
+        st.markdown("### 💸 Debitos")
+        _aba_debitos_pendentes(session)
+
+
 # ──────────────── aba: debitos pendentes ────────────────────
 
 def _aba_debitos_pendentes(session):
-    st.subheader("Debitos Pendentes de Conciliacao")
 
     pendentes = (
         session.query(TransacaoBancaria)
@@ -386,8 +422,14 @@ def _aba_debitos_pendentes(session):
                         manual_obj.conciliado = True
                         # Atualiza data de pagamento com a data real do debito
                         manual_obj.data_pagamento = tx.data
+                        # Auto-finaliza se zerou o saldo
+                        if manual_obj.valor_brl == saldo:
+                            tx.conciliada = True
                         session.commit()
-                        st.success("Lancamento manual vinculado!")
+                        if tx.conciliada:
+                            st.success("Lancamento vinculado e transacao conciliada!")
+                        else:
+                            st.success("Lancamento manual vinculado!")
                         st.rerun()
 
                     st.markdown("---")
@@ -433,29 +475,20 @@ def _aba_debitos_pendentes(session):
                             conciliado=False,
                         )
                         session.add(novo_item)
+                        # Auto-finaliza se este split zerou o saldo
+                        if val_dec == saldo:
+                            tx.conciliada = True
                         session.commit()
-                        st.success("Split adicionado!")
+                        if tx.conciliada:
+                            st.success("Split adicionado e transacao conciliada!")
+                        else:
+                            st.success("Split adicionado!")
                         st.rerun()
-
-            # Finalizar conciliacao
-            if saldo == 0 and splits_existentes:
-                st.markdown("---")
-                st.success("Todos os valores foram alocados!")
-                if st.button(
-                    "Finalizar Conciliacao",
-                    type="primary",
-                    key=f"btn_finalizar_{tx.id}",
-                ):
-                    tx.conciliada = True
-                    session.commit()
-                    st.success("Transacao conciliada com sucesso!")
-                    st.rerun()
 
 
 # ──────────────── aba: creditos ─────────────────────────────
 
 def _aba_creditos(session):
-    st.subheader("Creditos (Entradas)")
     st.caption(
         "Vincule cada credito do extrato a uma remessa para confirmar o recebimento "
         "e calcular o cambio efetivado automaticamente."
@@ -463,13 +496,16 @@ def _aba_creditos(session):
 
     creditos = (
         session.query(TransacaoBancaria)
-        .filter(TransacaoBancaria.tipo == "CREDIT")
+        .filter(
+            TransacaoBancaria.tipo == "CREDIT",
+            TransacaoBancaria.conciliada == False,
+        )
         .order_by(TransacaoBancaria.data.desc())
         .all()
     )
 
     if not creditos:
-        st.info("Nenhum credito encontrado no extrato importado.")
+        st.info("Nenhum credito pendente.")
         return
 
     # Remessas disponiveis
@@ -572,34 +608,118 @@ def _aba_creditos(session):
                         )
                         st.rerun()
 
-    # Totalizador
-    st.markdown("---")
-    total = sum(tx.valor for tx in creditos)
-    vinculados = sum(1 for tx in creditos if tx.id in creditos_vinculados)
-    col_a, col_b = st.columns(2)
-    col_a.metric("Total Creditos", f"R$ {total:,.2f}")
-    col_b.metric("Vinculados a Remessas", f"{vinculados} de {len(creditos)}")
-
-
 # ──────────────── aba: ja conciliadas ───────────────────────
 
 def _aba_conciliadas(session):
     st.subheader("Transacoes Conciliadas")
 
-    conciliadas = (
-        session.query(TransacaoBancaria)
+    # Limites de data com base nas conciliadas existentes
+    datas_existentes = [
+        d for (d,) in session.query(TransacaoBancaria.data)
         .filter(TransacaoBancaria.conciliada == True)
-        .order_by(TransacaoBancaria.data.desc())
         .all()
-    )
+    ]
 
-    if not conciliadas:
+    if not datas_existentes:
         st.info("Nenhuma transacao conciliada ainda.")
         return
+
+    data_min = min(datas_existentes)
+    data_max = max(datas_existentes)
+
+    # Filtro de periodo
+    col_ini, col_fim, col_tipo = st.columns([2, 2, 2])
+    data_ini = col_ini.date_input(
+        "De",
+        value=data_min,
+        min_value=data_min,
+        max_value=data_max,
+        key="conc_data_ini",
+        format="DD/MM/YYYY",
+    )
+    data_fim = col_fim.date_input(
+        "Ate",
+        value=data_max,
+        min_value=data_min,
+        max_value=data_max,
+        key="conc_data_fim",
+        format="DD/MM/YYYY",
+    )
+    filtro_tipo = col_tipo.selectbox(
+        "Tipo",
+        ["Todos", "Apenas Debitos", "Apenas Creditos"],
+        key="conc_filtro_tipo",
+    )
+
+    if data_ini > data_fim:
+        st.error("A data inicial nao pode ser maior que a data final.")
+        return
+
+    query = (
+        session.query(TransacaoBancaria)
+        .filter(
+            TransacaoBancaria.conciliada == True,
+            TransacaoBancaria.data >= data_ini,
+            TransacaoBancaria.data <= data_fim,
+        )
+    )
+    if filtro_tipo == "Apenas Debitos":
+        query = query.filter(TransacaoBancaria.tipo == "DEBIT")
+    elif filtro_tipo == "Apenas Creditos":
+        query = query.filter(TransacaoBancaria.tipo == "CREDIT")
+
+    conciliadas = query.order_by(TransacaoBancaria.data.desc()).all()
+
+    if not conciliadas:
+        st.info("Nenhuma transacao conciliada no periodo selecionado.")
+        return
+
+    st.caption(f"{len(conciliadas)} transacao(oes) no periodo")
+
+    # Mapa de remessas para identificar creditos vinculados
+    remessas_por_tx = {
+        r.transacao_bancaria_id: r
+        for r in session.query(Remessa).filter(Remessa.transacao_bancaria_id != None).all()
+    }
 
     for tx in conciliadas:
         valor_abs = abs(tx.valor)
 
+        # Caso 1: transacao e um CREDITO (Remessa recebida)
+        if tx.tipo == "CREDIT":
+            remessa = remessas_por_tx.get(tx.id)
+            if remessa:
+                titulo = (
+                    f"✅ {tx.data} | {tx.descricao} | R$ {valor_abs:,.2f} | "
+                    f"Remessa {remessa.numero}"
+                )
+            else:
+                titulo = f"✅ {tx.data} | {tx.descricao} | R$ {valor_abs:,.2f} | Credito"
+
+            with st.expander(titulo):
+                if remessa:
+                    st.success(
+                        f"Remessa {remessa.numero} — "
+                        f"€ {remessa.valor_eur:,.2f} × R$ {remessa.cambio_efetivado:,.4f} = "
+                        f"R$ {remessa.valor_brl:,.2f}"
+                    )
+                else:
+                    st.info("Credito conciliado sem vinculo a remessa.")
+
+                if st.button("Desfazer Conciliacao", key=f"btn_desfazer_cred_{tx.id}"):
+                    if remessa:
+                        remessa.transacao_bancaria_id = None
+                        remessa.recebida = False
+                        remessa.cambio_efetivado = None
+                        remessa.valor_brl = None
+                        remessa.data_recebimento = None
+                    tx.conciliada = False
+                    session.commit()
+                    st.info("Conciliacao desfeita. O credito voltou para pendentes.")
+                    st.rerun()
+            continue
+
+        # Caso 2: transacao e um DEBITO
         # Identifica se esta transacao corresponde a um Reembolso conciliado
         reembolso_vinc = (
             session.query(Reembolso)
