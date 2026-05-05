@@ -4,6 +4,8 @@ Modulo Importacao OFX
 Upload de extrato bancario OFX, preview e importacao para o banco.
 """
 
+import hashlib
+import re
 from decimal import Decimal
 from io import BytesIO
 
@@ -15,9 +17,64 @@ from database import get_session
 from models import TransacaoBancaria
 
 
+def _injetar_fitid_faltante(conteudo: bytes) -> bytes:
+    """
+    Alguns bancos brasileiros geram OFX sem o campo <FITID>, que e obrigatorio.
+    Esta funcao detecta blocos <STMTTRN> sem FITID e gera um identificador
+    deterministico (hash de data + valor + descricao + posicao) para que o
+    parse funcione e a deduplicacao continue confiavel em reimportacoes.
+    """
+    try:
+        texto = conteudo.decode("utf-8", errors="ignore")
+    except Exception:
+        texto = conteudo.decode("latin-1", errors="ignore")
+
+    def _campo(bloco: str, tag: str) -> str:
+        m = re.search(rf"<{tag}>([^<\r\n]*)", bloco, flags=re.IGNORECASE)
+        return (m.group(1).strip() if m else "")
+
+    contador = {"n": 0}
+
+    def _processar_bloco(match):
+        bloco = match.group(0)
+        if re.search(r"<FITID>", bloco, flags=re.IGNORECASE):
+            return bloco
+
+        contador["n"] += 1
+        chave = "|".join([
+            _campo(bloco, "DTPOSTED"),
+            _campo(bloco, "TRNAMT"),
+            _campo(bloco, "MEMO"),
+            _campo(bloco, "NAME"),
+            _campo(bloco, "CHECKNUM"),
+            _campo(bloco, "REFNUM"),
+            str(contador["n"]),
+        ])
+        fitid = "AUTO" + hashlib.md5(chave.encode("utf-8")).hexdigest()[:20].upper()
+
+        # Injeta o FITID logo apos a abertura do <STMTTRN>
+        return re.sub(
+            r"(<STMTTRN>)",
+            r"\1<FITID>" + fitid,
+            bloco,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+    texto_corrigido = re.sub(
+        r"<STMTTRN>.*?</STMTTRN>",
+        _processar_bloco,
+        texto,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    return texto_corrigido.encode("utf-8")
+
+
 def _parse_ofx(arquivo_bytes: bytes):
     """Parseia o conteudo do OFX e retorna lista de dicts com as transacoes."""
-    ofx = OfxParser.parse(BytesIO(arquivo_bytes))
+    conteudo_corrigido = _injetar_fitid_faltante(arquivo_bytes)
+    ofx = OfxParser.parse(BytesIO(conteudo_corrigido))
     transacoes = []
     for conta in ofx.accounts if hasattr(ofx, 'accounts') else [ofx.account]:
         for tx in conta.statement.transactions:
