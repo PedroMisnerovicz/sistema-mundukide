@@ -552,22 +552,23 @@ def _aba_creditos(session):
                     st.info("Credito desvinculado. Remessa voltou ao status pendente.")
                     st.rerun()
             else:
-                # Nao vinculado — mostra opcoes de remessa
+                # Nao vinculado — mostra TODAS as remessas com valor EUR cadastrado.
+                # Permite reatribuir uma remessa ja recebida (corrige vinculos errados).
                 remessas_disponiveis = [
                     r for r in remessas
-                    if not r.recebida and r.valor_eur and r.valor_eur > 0
+                    if r.valor_eur and r.valor_eur > 0
                 ]
 
                 if not remessas_disponiveis:
                     st.warning(
-                        "Todas as remessas ja foram recebidas ou nao possuem valor EUR cadastrado. "
+                        "Nenhuma remessa cadastrada com valor EUR. "
                         "Verifique em Cadastros > Remessas."
                     )
                 else:
-                    opcoes = {
-                        f"Remessa {r.numero} — € {r.valor_eur:,.2f}": r.numero
-                        for r in remessas_disponiveis
-                    }
+                    opcoes = {}
+                    for r in remessas_disponiveis:
+                        sufixo = " — JA RECEBIDA (sera reatribuida)" if r.recebida else ""
+                        opcoes[f"Remessa {r.numero} — € {r.valor_eur:,.2f}{sufixo}"] = r.numero
 
                     with st.form(f"form_vincular_cred_{tx.id}"):
                         sel = st.selectbox(
@@ -588,9 +589,34 @@ def _aba_creditos(session):
                                 f"= **R$ {cambio_calc:,.4f} / €**"
                             )
 
+                        # Aviso quando vai sobrescrever vinculo existente
+                        if rem_sel.recebida and rem_sel.transacao_bancaria_id:
+                            tx_anterior = session.get(
+                                TransacaoBancaria, rem_sel.transacao_bancaria_id
+                            )
+                            if tx_anterior:
+                                st.warning(
+                                    f"Atencao: a Remessa {rem_sel.numero} ja esta "
+                                    f"vinculada ao credito de {tx_anterior.data} "
+                                    f"(R$ {tx_anterior.valor:,.2f}). "
+                                    f"Ao confirmar, o vinculo anterior sera desfeito "
+                                    f"e este credito passara a ser a Remessa {rem_sel.numero}."
+                                )
+
                         vincular = st.form_submit_button("Confirmar Vinculo", type="primary")
 
                     if vincular:
+                        # Se a remessa ja estava vinculada a outro credito, libera o anterior
+                        if (
+                            rem_sel.transacao_bancaria_id
+                            and rem_sel.transacao_bancaria_id != tx.id
+                        ):
+                            tx_anterior = session.get(
+                                TransacaoBancaria, rem_sel.transacao_bancaria_id
+                            )
+                            if tx_anterior:
+                                tx_anterior.conciliada = False
+
                         cambio_efetivado = (tx.valor / rem_sel.valor_eur).quantize(
                             Decimal("0.0001")
                         )

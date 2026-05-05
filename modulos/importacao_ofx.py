@@ -199,53 +199,161 @@ def _importar_transacoes(transacoes: list):
 # ──────────────────── aba: extrato ──────────────────────────
 
 def _aba_extrato():
-    st.subheader("Extrato Importado")
+    st.subheader("Movimentacao da Conta Corrente")
 
     session = get_session()
 
-    # Filtro
-    filtro = st.radio(
-        "Filtrar por status",
-        ["Todas", "Pendentes", "Conciliadas"],
-        horizontal=True,
-        key="filtro_extrato",
-    )
+    # Pega todas as transacoes para descobrir o intervalo de datas
+    todas = session.query(TransacaoBancaria).order_by(TransacaoBancaria.data).all()
 
-    query = session.query(TransacaoBancaria).order_by(TransacaoBancaria.data.desc())
-
-    if filtro == "Pendentes":
-        query = query.filter(TransacaoBancaria.conciliada == False)
-    elif filtro == "Conciliadas":
-        query = query.filter(TransacaoBancaria.conciliada == True)
-
-    transacoes = query.all()
-
-    if not transacoes:
-        st.info("Nenhuma transacao encontrada.")
+    if not todas:
+        st.info("Nenhuma transacao importada. Faca upload do OFX primeiro.")
         session.close()
         return
 
-    dados = []
-    for tx in transacoes:
-        dados.append({
-            "Data": str(tx.data),
-            "Descricao": tx.descricao,
-            "Valor": f"R$ {tx.valor:,.2f}",
-            "Tipo": tx.tipo,
-            "Status": "Conciliada" if tx.conciliada else "Pendente",
-            "FITID": tx.fitid,
+    data_min = todas[0].data
+    data_max = todas[-1].data
+
+    # Filtros
+    col_de, col_ate, col_status = st.columns([2, 2, 2])
+    data_ini = col_de.date_input(
+        "Data Inicial",
+        value=data_min,
+        min_value=data_min,
+        max_value=data_max,
+        key="extrato_data_ini",
+        format="DD/MM/YYYY",
+    )
+    data_fim = col_ate.date_input(
+        "Data Final",
+        value=data_max,
+        min_value=data_min,
+        max_value=data_max,
+        key="extrato_data_fim",
+        format="DD/MM/YYYY",
+    )
+    filtro_status = col_status.selectbox(
+        "Situacao",
+        ["Todas", "Pendentes", "Conciliadas"],
+        key="extrato_filtro_status",
+    )
+
+    if data_ini > data_fim:
+        st.error("A data inicial nao pode ser maior que a data final.")
+        session.close()
+        return
+
+    # Saldo acumulado ATE o dia anterior a data_ini (saldo de abertura do periodo)
+    from datetime import timedelta as _td
+    saldo_abertura = (
+        session.query(TransacaoBancaria)
+        .filter(TransacaoBancaria.data < data_ini)
+        .all()
+    )
+    saldo_corrente = sum(tx.valor for tx in saldo_abertura)
+
+    # Transacoes do periodo (ordem ascendente para acumular saldo corretamente)
+    no_periodo = [
+        tx for tx in todas
+        if data_ini <= tx.data <= data_fim
+    ]
+
+    # Aplica filtro de status (mas o saldo continua acumulando todas)
+    def _passa_filtro(tx):
+        if filtro_status == "Pendentes":
+            return not tx.conciliada
+        if filtro_status == "Conciliadas":
+            return tx.conciliada
+        return True
+
+    # Constroi linhas com saldo acumulado por linha + linhas de SALDO por dia
+    linhas = []
+    linhas.append({
+        "Situacao": "",
+        "Data": data_ini.strftime("%d/%m/%y"),
+        "Lancamento": "SALDO ANTERIOR",
+        "Categoria": "",
+        "Valor (R$)": None,
+        "Saldo (R$)": float(saldo_corrente),
+    })
+
+    dia_atual = None
+    saldo_dia = saldo_corrente
+    for tx in no_periodo:
+        # Quando muda o dia, fecha o saldo do dia anterior (se houve movimento)
+        if dia_atual is not None and tx.data != dia_atual:
+            linhas.append({
+                "Situacao": "",
+                "Data": dia_atual.strftime("%d/%m/%y"),
+                "Lancamento": "SALDO",
+                "Categoria": "",
+                "Valor (R$)": None,
+                "Saldo (R$)": float(saldo_dia),
+            })
+
+        saldo_corrente += tx.valor
+        saldo_dia = saldo_corrente
+        dia_atual = tx.data
+
+        if not _passa_filtro(tx):
+            continue
+
+        situacao = "✅ Conciliado" if tx.conciliada else "⏳ Pendente"
+
+        # Tenta descobrir categoria (se houver split) ou tipo
+        categoria_str = ""
+        if tx.itens_despesa:
+            cats = list({s.categoria_despesa.nome for s in tx.itens_despesa})
+            categoria_str = " / ".join(cats[:2])
+            if len(cats) > 2:
+                categoria_str += f" (+{len(cats) - 2})"
+        elif tx.tipo == "CREDIT":
+            categoria_str = "Entrada"
+        else:
+            categoria_str = "—"
+
+        linhas.append({
+            "Situacao": situacao,
+            "Data": tx.data.strftime("%d/%m/%y"),
+            "Lancamento": tx.descricao,
+            "Categoria": categoria_str,
+            "Valor (R$)": float(tx.valor),
+            "Saldo (R$)": float(saldo_corrente),
         })
 
-    st.dataframe(pd.DataFrame(dados), use_container_width=True, hide_index=True)
+    # Fecha o saldo do ultimo dia
+    if dia_atual is not None:
+        linhas.append({
+            "Situacao": "",
+            "Data": dia_atual.strftime("%d/%m/%y"),
+            "Lancamento": "SALDO",
+            "Categoria": "",
+            "Valor (R$)": None,
+            "Saldo (R$)": float(saldo_dia),
+        })
 
-    # Totalizadores
-    total = sum(tx.valor for tx in transacoes)
-    pendentes = sum(1 for tx in transacoes if not tx.conciliada)
-    conciliadas = sum(1 for tx in transacoes if tx.conciliada)
+    df = pd.DataFrame(linhas)
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Transacoes", len(transacoes))
-    col2.metric("Pendentes", pendentes)
-    col3.metric("Conciliadas", conciliadas)
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
+            "Saldo (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
+        },
+    )
+
+    # Resumo
+    transacoes_filtradas = [tx for tx in no_periodo if _passa_filtro(tx)]
+    total_periodo = sum(tx.valor for tx in no_periodo)
+    pendentes = sum(1 for tx in no_periodo if not tx.conciliada)
+    conciliadas = sum(1 for tx in no_periodo if tx.conciliada)
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Saldo Abertura", f"R$ {sum(t.valor for t in saldo_abertura):,.2f}")
+    col2.metric("Movimentacao", f"R$ {total_periodo:,.2f}")
+    col3.metric("Saldo Final", f"R$ {saldo_corrente:,.2f}")
+    col4.metric("Pendentes / Conciliadas", f"{pendentes} / {conciliadas}")
 
     session.close()
