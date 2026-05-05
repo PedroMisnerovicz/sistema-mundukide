@@ -615,8 +615,11 @@ def _pdf_detalhamento(pdf, session, centros, cambio, lang):
         pdf.ln(5)
 
 
-def _gerar_xlsx_financiador(session, cambio):
-    """Exporta todas as despesas no formato exigido pelo financiador Mundukide.
+def _gerar_xlsx_financiador(session, cambio, data_ini=None, data_fim=None):
+    """Exporta despesas no formato exigido pelo financiador Mundukide.
+
+    Filtra por data_ini/data_fim (inclusivos) usando data_emissao com fallback
+    para data. Se nenhum dos dois for passado, exporta todas as despesas.
 
     Formato: 21 colunas fixas (C_CREATED_DATE ... C_COF_EURO).
     Valores fixos: C_CONTRACT=M349, C_ACTIVITY=Programa Brasil,
@@ -633,15 +636,19 @@ def _gerar_xlsx_financiador(session, cambio):
         "C_EUR_EQUI", "C_FIN_EURO", "C_COF_EURO",
     ]
 
-    itens = (
+    data_ref_expr = sqlfunc.coalesce(ItemDespesa.data_emissao, ItemDespesa.data)
+    query = (
         session.query(ItemDespesa)
         .join(CategoriaDespesa)
         .join(CentroCusto)
-        .order_by(
-            ItemDespesa.data_emissao, ItemDespesa.data, ItemDespesa.id,
-        )
-        .all()
     )
+    if data_ini is not None:
+        query = query.filter(data_ref_expr >= data_ini)
+    if data_fim is not None:
+        query = query.filter(data_ref_expr <= data_fim)
+    itens = query.order_by(
+        ItemDespesa.data_emissao, ItemDespesa.data, ItemDespesa.id,
+    ).all()
 
     cambio_f = float(cambio) if cambio else 0.0
     linhas = []
@@ -796,22 +803,75 @@ def render():
 
     with col_xlsx:
         st.markdown(botao_offset, unsafe_allow_html=True)
-        if st.button(
-            "Exportar Excel", type="secondary", use_container_width=True,
+        with st.popover(
+            "Exportar Excel",
+            use_container_width=True,
             help="Planilha no formato exigido pelo financiador Mundukide",
         ):
-            with st.spinner("Gerando planilha no formato do financiador..."):
-                xlsx_bytes = _gerar_xlsx_financiador(session, cambio)
-                st.session_state["dashboard_xlsx"] = xlsx_bytes
-            st.rerun()
+            # Range de datas com base nas despesas existentes
+            data_ref_expr = sqlfunc.coalesce(
+                ItemDespesa.data_emissao, ItemDespesa.data,
+            )
+            data_min, data_max = (
+                session.query(
+                    sqlfunc.min(data_ref_expr),
+                    sqlfunc.max(data_ref_expr),
+                ).first()
+                or (None, None)
+            )
+
+            if data_min is None or data_max is None:
+                st.info("Nenhuma despesa cadastrada para exportar.")
+            else:
+                col_de, col_ate = st.columns(2)
+                data_ini_xlsx = col_de.date_input(
+                    "De",
+                    value=data_min,
+                    min_value=data_min,
+                    max_value=data_max,
+                    key="xlsx_data_ini",
+                    format="DD/MM/YYYY",
+                )
+                data_fim_xlsx = col_ate.date_input(
+                    "Ate",
+                    value=data_max,
+                    min_value=data_min,
+                    max_value=data_max,
+                    key="xlsx_data_fim",
+                    format="DD/MM/YYYY",
+                )
+
+                if data_ini_xlsx > data_fim_xlsx:
+                    st.error("A data inicial nao pode ser maior que a data final.")
+                else:
+                    if st.button(
+                        "Gerar planilha",
+                        type="primary",
+                        use_container_width=True,
+                        key="btn_gerar_xlsx",
+                    ):
+                        with st.spinner("Gerando planilha do financiador..."):
+                            xlsx_bytes = _gerar_xlsx_financiador(
+                                session, cambio, data_ini_xlsx, data_fim_xlsx,
+                            )
+                            st.session_state["dashboard_xlsx"] = xlsx_bytes
+                            st.session_state["dashboard_xlsx_periodo"] = (
+                                f"{data_ini_xlsx.strftime('%Y%m%d')}_"
+                                f"{data_fim_xlsx.strftime('%Y%m%d')}"
+                            )
+                        st.rerun()
 
     with col_xlsx_dl:
         if "dashboard_xlsx" in st.session_state:
             st.markdown(botao_offset, unsafe_allow_html=True)
+            sufixo = st.session_state.get(
+                "dashboard_xlsx_periodo",
+                date.today().strftime("%Y%m%d"),
+            )
             st.download_button(
                 "Baixar Excel",
                 data=st.session_state["dashboard_xlsx"],
-                file_name=f"expenses_{date.today().strftime('%Y%m%d')}.xlsx",
+                file_name=f"expenses_{sufixo}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
                 use_container_width=True,
