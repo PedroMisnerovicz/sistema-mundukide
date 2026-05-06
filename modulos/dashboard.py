@@ -39,6 +39,7 @@ MAPA_CATEGORIAS_FINANCIADOR = {
     "internet": "D Fornecimentos",
     "encargos sociais": "G Pessoas",
     "salarios": "G Pessoas",
+    "tarifas bancarias": "F Outras despesas e H Projecto",
 }
 
 

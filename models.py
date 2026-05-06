@@ -224,6 +224,20 @@ class TransacaoBancaria(Base):
         default=False,
         comment="True quando todos os splits foram atribuídos",
     )
+    eh_estorno = Column(
+        Boolean,
+        default=False,
+        nullable=False,
+        comment="True quando a transacao e um estorno (entrada ou saida) e nao "
+                "deve impactar tetos orcamentarios nem ser tratada como remessa.",
+    )
+    estorno_par_id = Column(
+        Integer,
+        ForeignKey("transacoes_bancarias.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="Aponta para a transacao bancaria parceira do estorno (debito original "
+                "<-> credito de estorno). Pareamento bidirecional.",
+    )
     data_importacao = Column(
         DateTime,
         default=func.now(),
@@ -236,6 +250,14 @@ class TransacaoBancaria(Base):
         back_populates="transacao_bancaria",
         cascade="all, delete-orphan",
         lazy="select",
+    )
+
+    # Auto-relacionamento: a transacao parceira no pareamento de estorno
+    estorno_par = relationship(
+        "TransacaoBancaria",
+        foreign_keys=[estorno_par_id],
+        remote_side="TransacaoBancaria.id",
+        post_update=True,
     )
 
     def __repr__(self):

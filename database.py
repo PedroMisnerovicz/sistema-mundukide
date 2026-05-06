@@ -112,6 +112,26 @@ def _apply_migrations():
                         "ADD COLUMN dia_pagamento_previsto INTEGER"
                     ))
 
+            # ── transacoes_bancarias (estornos) ──────────────
+            if _tabela_existe(conn, "transacoes_bancarias"):
+                cols_tx = _colunas(conn, "transacoes_bancarias")
+                if "eh_estorno" not in cols_tx:
+                    if _is_sqlite:
+                        conn.execute(text(
+                            "ALTER TABLE transacoes_bancarias "
+                            "ADD COLUMN eh_estorno BOOLEAN NOT NULL DEFAULT 0"
+                        ))
+                    else:
+                        conn.execute(text(
+                            "ALTER TABLE transacoes_bancarias "
+                            "ADD COLUMN eh_estorno BOOLEAN NOT NULL DEFAULT FALSE"
+                        ))
+                if "estorno_par_id" not in cols_tx:
+                    conn.execute(text(
+                        "ALTER TABLE transacoes_bancarias "
+                        "ADD COLUMN estorno_par_id INTEGER"
+                    ))
+
             # ── itens_despesa (Fase 1 do refactor) ───────────
             if _tabela_existe(conn, "itens_despesa"):
                 cols_item = _colunas(conn, "itens_despesa")

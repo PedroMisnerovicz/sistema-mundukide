@@ -77,6 +77,124 @@ def _meses_proximos(data_ref: date, raio: int = 1):
         yield (ano, mes)
 
 
+def _candidatos_par_estorno(session, tx: TransacaoBancaria) -> list:
+    """Retorna transacoes candidatas a parear com tx em um estorno.
+
+    Criterios:
+      - tipo oposto (DEBIT <-> CREDIT)
+      - mesmo valor (com sinal oposto: -79,80 <-> +79,80)
+      - ou esta pendente (conciliada == False) OU ja e um estorno solo
+        (eh_estorno == True AND estorno_par_id IS NULL).
+    """
+    tipo_oposto = "CREDIT" if tx.tipo == "DEBIT" else "DEBIT"
+    valor_oposto = -tx.valor
+    return (
+        session.query(TransacaoBancaria)
+        .filter(
+            TransacaoBancaria.id != tx.id,
+            TransacaoBancaria.tipo == tipo_oposto,
+            TransacaoBancaria.valor == valor_oposto,
+            (
+                (TransacaoBancaria.conciliada == False)
+                | (
+                    (TransacaoBancaria.eh_estorno == True)
+                    & (TransacaoBancaria.estorno_par_id == None)
+                )
+            ),
+        )
+        .order_by(TransacaoBancaria.data.desc())
+        .all()
+    )
+
+
+def _marcar_como_estorno(session, tx: TransacaoBancaria, par_id=None):
+    """Marca uma transacao como estorno (conciliada, sem impacto orcamentario).
+    Se par_id for passado, faz o pareamento bidirecional.
+
+    IMPORTANTE: remove qualquer ItemDespesa ja vinculado (estorno nao gera despesa).
+    Despesas que fazem parte de Reembolso NAO sao removidas — caller deve barrar.
+    """
+    for it in list(tx.itens_despesa):
+        if it.reembolso_id is None:
+            session.delete(it)
+    tx.eh_estorno = True
+    tx.conciliada = True
+
+    if par_id:
+        par = session.get(TransacaoBancaria, par_id)
+        if par:
+            for it in list(par.itens_despesa):
+                if it.reembolso_id is None:
+                    session.delete(it)
+            tx.estorno_par_id = par.id
+            par.estorno_par_id = tx.id
+            par.eh_estorno = True
+            par.conciliada = True
+
+
+def _desfazer_estorno(session, tx: TransacaoBancaria):
+    """Desfaz marcacao de estorno. Se houver par, desfaz no par tambem."""
+    par = tx.estorno_par
+    tx.eh_estorno = False
+    tx.conciliada = False
+    tx.estorno_par_id = None
+    if par is not None:
+        par.estorno_par_id = None
+        par.eh_estorno = False
+        par.conciliada = False
+
+
+def _bloco_marcar_estorno(session, tx: TransacaoBancaria, contexto: str):
+    """Renderiza o bloco 'Marcar como estorno' para uma transacao.
+    contexto = 'debito' ou 'credito' (so muda o texto auxiliar).
+    Retorna True se o usuario acionou a marcacao (caller deve st.rerun)."""
+    candidatos = _candidatos_par_estorno(session, tx)
+
+    legenda = (
+        "Use quando este debito foi estornado depois (ex: tarifa cobrada e devolvida)."
+        if contexto == "debito"
+        else "Use quando esta entrada e um estorno (ex: devolucao de tarifa, TED errado revertido)."
+    )
+    st.markdown("**🔄 Marcar como estorno (sem impacto orcamentario):**")
+    st.caption(legenda)
+
+    opcoes_par = {"(sem par - marcar sozinho)": None}
+    for cand in candidatos:
+        sinal = "+" if cand.tipo == "CREDIT" else "-"
+        marca_estorno = " [estorno solo]" if cand.eh_estorno else ""
+        label = (
+            f"{cand.data.strftime('%d/%m/%Y')} | {cand.descricao[:50]} | "
+            f"{sinal}R$ {abs(cand.valor):,.2f}{marca_estorno}"
+        )
+        opcoes_par[label] = cand.id
+
+    sel_par = st.selectbox(
+        "Parear com transacao oposta (mesmo valor)",
+        list(opcoes_par.keys()),
+        key=f"sel_par_estorno_{tx.id}",
+    )
+    st.caption(
+        "Se a transacao oposta ja esta conciliada com despesa lancada, "
+        "va em 'Ja Conciliadas' primeiro e desfaca a conciliacao dela "
+        "para que apareca aqui."
+    )
+    if st.button(
+        "Confirmar marcacao de estorno",
+        key=f"btn_marcar_estorno_{tx.id}",
+    ):
+        _marcar_como_estorno(session, tx, opcoes_par[sel_par])
+        session.commit()
+        if opcoes_par[sel_par] is not None:
+            st.success("Estorno marcado e pareado com a transacao oposta!")
+        else:
+            st.success(
+                "Estorno marcado (sem par). Tu pode parear depois marcando "
+                "a transacao oposta."
+            )
+        return True
+    return False
+
+
 def _candidatos_folha(session, tx: TransacaoBancaria) -> list:
     """Retorna lista de tuplas (lr, ano, mes, data_projetada, dias_diff) ordenadas
     por proximidade de data para um debito bancario tx.
@@ -292,6 +410,13 @@ def _aba_debitos_pendentes(session):
 
             if saldo > 0:
                 st.markdown("---")
+
+                # ─── Fluxo E: Marcar como estorno ───
+                # Apenas possivel quando nenhum split foi criado (saldo == valor total)
+                if not splits_existentes:
+                    if _bloco_marcar_estorno(session, tx, contexto="debito"):
+                        st.rerun()
+                    st.markdown("---")
 
                 # ─── Fluxo C: Vincular a Reembolso (valor exato) ───
                 # Apenas possivel quando nenhum split foi criado ainda (saldo == valor total)
@@ -564,6 +689,10 @@ def _aba_creditos(session):
                         "Nenhuma remessa cadastrada com valor EUR. "
                         "Verifique em Cadastros > Remessas."
                     )
+                    # Mesmo sem remessas, permite marcar estorno
+                    st.markdown("---")
+                    if _bloco_marcar_estorno(session, tx, contexto="credito"):
+                        st.rerun()
                 else:
                     opcoes = {}
                     for r in remessas_disponiveis:
@@ -632,6 +761,11 @@ def _aba_creditos(session):
                             f"Cambio: R$ {cambio_efetivado:,.4f}/€ | "
                             f"Total: R$ {tx.valor:,.2f}"
                         )
+                        st.rerun()
+
+                    # Alternativa: marcar como estorno (nao e remessa)
+                    st.markdown("---")
+                    if _bloco_marcar_estorno(session, tx, contexto="credito"):
                         st.rerun()
 
 # ──────────────── aba: ja conciliadas ───────────────────────
@@ -710,6 +844,58 @@ def _aba_conciliadas(session):
 
     for tx in conciliadas:
         valor_abs = abs(tx.valor)
+
+        # Caso 0: transacao e um ESTORNO (tem prioridade — nao impacta tetos)
+        if tx.eh_estorno:
+            sinal = "+" if tx.tipo == "CREDIT" else "-"
+            par = tx.estorno_par
+            if par:
+                sinal_par = "+" if par.tipo == "CREDIT" else "-"
+                info_par = (
+                    f" | Par: {par.data.strftime('%d/%m/%Y')} "
+                    f"{sinal_par}R$ {abs(par.valor):,.2f}"
+                )
+            else:
+                info_par = " | (sem par)"
+            titulo = (
+                f"🔄 ESTORNO | {tx.data} | {tx.descricao} | "
+                f"{sinal}R$ {valor_abs:,.2f}{info_par}"
+            )
+
+            with st.expander(titulo):
+                st.info(
+                    "Esta transacao foi marcada como **ESTORNO** e NAO impacta "
+                    "nenhum teto orcamentario nem e tratada como remessa."
+                )
+                if par:
+                    sinal_par = "+" if par.tipo == "CREDIT" else "-"
+                    st.caption(
+                        f"Pareada com: {par.data.strftime('%d/%m/%Y')} | "
+                        f"{par.descricao} | {sinal_par}R$ {abs(par.valor):,.2f}"
+                    )
+                else:
+                    st.warning(
+                        "Sem par registrado. Se a transacao oposta ja foi importada, "
+                        "marque-a tambem como estorno (em Pendentes) e selecione esta "
+                        "como par."
+                    )
+
+                if st.button(
+                    "Desfazer marcacao de estorno",
+                    key=f"btn_desfazer_estorno_{tx.id}",
+                ):
+                    tinha_par = par is not None
+                    _desfazer_estorno(session, tx)
+                    session.commit()
+                    if tinha_par:
+                        st.info(
+                            "Estorno desfeito. As duas transacoes (par) "
+                            "voltaram para pendentes."
+                        )
+                    else:
+                        st.info("Estorno desfeito. A transacao voltou para pendentes.")
+                    st.rerun()
+            continue
 
         # Caso 1: transacao e um CREDITO (Remessa recebida)
         if tx.tipo == "CREDIT":
