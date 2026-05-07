@@ -226,6 +226,21 @@ pymupdf>=1.24.0
 3. Enviar: `git add .` → `git commit -m "descricao"` → `git push`
 4. Streamlit Cloud atualiza automaticamente em 2-3 minutos
 
+### IMPORTANTE: Toda alteracao precisa atualizar AMBOS os ambientes
+
+O usuario usa o Streamlit local para testar e o Streamlit Cloud em producao.
+Apos qualquer `git push`, e obrigatorio sincronizar tambem a pasta principal
+local — caso contrario o app local continua rodando o codigo antigo.
+
+- **Cloud:** atualiza sozinho apos `git push origin main` (2-3 min).
+- **Local:** rodar `git pull origin main` na pasta principal:
+  ```
+  git -C "C:/Users/Administrativo/FINAPOP CONSULTORIA LTDA/FINAPOP - ARQUIVOS FINAPOP/GRUPO FINAPOP/2. ADMINISTRATIVO/FINANCEIRO/3.SISTEMA_MUNDUKIDE" pull origin main
+  ```
+- Quando a mudanca alterar constantes/imports no topo de modulos, avisar o
+  usuario para reiniciar o `streamlit run app.py` (Ctrl+C + rerun) — o
+  auto-reload do Streamlit nem sempre pega.
+
 ### Como trocar a senha do app
 - **Local:** editar `.streamlit/secrets.toml`
 - **Nuvem:** share.streamlit.io → app → "..." → Settings → Secrets
