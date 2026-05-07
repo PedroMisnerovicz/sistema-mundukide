@@ -45,11 +45,106 @@ _H_L3     = 16.0              # altura alocada para linha 3
 _GAP      = 3.0               # espacamento entre blocos de linha
 
 # Aparencia de carimbo manual (simula carimbo de borracha aplicado a mao)
-_COR_TINTA  = (0.0, 0.18, 0.55)   # azul escuro — cor tipica de tinta de carimbo
-_OPACIDADE  = 0.82                  # leve transparencia (simula absorcao da tinta no papel)
-_BORDA_W    = 1.5                   # borda ligeiramente mais encorpada
-_JITTER     = 3.0                   # variacao de posicao em pontos (~1 mm por eixo)
-_ROT_MAX    = 2.0                   # rotacao maxima em graus (±)
+_COR_TINTA      = (0.0, 0.18, 0.55)   # azul escuro — cor tipica de tinta de carimbo
+_OPACIDADE_BASE = 0.78                # opacidade media da tinta (varia por elemento)
+_BORDA_W        = 1.6                 # largura media da borda
+_ROT_MAX        = 3.5                 # rotacao maxima em graus (±) — manual e mais visivel
+
+# Parametros de "imperfeicao" — fazem o carimbo parecer borracha aplicada a mao
+_BORDA_SEG_PT      = 2.8              # comprimento medio de cada segmento da borda (pt)
+_BORDA_FALHA_PROB  = 0.12             # chance de cada segmento "nao pegar" (falha de tinta)
+_BORDA_OP_MIN      = 0.45             # opacidade minima de um segmento
+_BORDA_OP_MAX      = 0.95             # opacidade maxima de um segmento
+_BORDA_W_MIN       = 0.9              # largura minima por segmento
+_BORDA_W_MAX       = 2.1              # largura maxima por segmento
+_RESPINGOS_MIN     = 6                # numero minimo de respingos de tinta
+_RESPINGOS_MAX     = 16               # numero maximo de respingos
+_TEXTO_OP_MIN      = 0.62             # opacidade minima do texto
+_TEXTO_OP_MAX      = 0.90             # opacidade maxima do texto
+
+
+# ─── Helpers de aparencia manual ────────────────────────────────────────────
+
+def _draw_borda_irregular(page, rect, cor, morph):
+    """Desenha o retangulo da borda como dezenas de segmentos curtos com
+    falhas, variando largura e opacidade — simula a tinta da borracha que
+    nao toca o papel uniformemente."""
+    lados = [
+        ((rect.x0, rect.y0), (rect.x1, rect.y0)),  # top
+        ((rect.x1, rect.y0), (rect.x1, rect.y1)),  # right
+        ((rect.x1, rect.y1), (rect.x0, rect.y1)),  # bottom
+        ((rect.x0, rect.y1), (rect.x0, rect.y0)),  # left
+    ]
+
+    for (xs, ys), (xe, ye) in lados:
+        comprimento = ((xe - xs) ** 2 + (ye - ys) ** 2) ** 0.5
+        n_segs = max(8, int(comprimento / _BORDA_SEG_PT))
+
+        for i in range(n_segs):
+            # Falha de tinta: simplesmente nao desenha esse segmento
+            if random.random() < _BORDA_FALHA_PROB:
+                continue
+
+            t1 = i / n_segs
+            t2 = (i + 1) / n_segs
+            x1 = xs + (xe - xs) * t1
+            y1 = ys + (ye - ys) * t1
+            x2 = xs + (xe - xs) * t2
+            y2 = ys + (ye - ys) * t2
+
+            op = random.uniform(_BORDA_OP_MIN, _BORDA_OP_MAX)
+            w = random.uniform(_BORDA_W_MIN, _BORDA_W_MAX)
+
+            page.draw_line(
+                fitz.Point(x1, y1),
+                fitz.Point(x2, y2),
+                color=cor,
+                width=w,
+                stroke_opacity=op,
+                morph=morph,
+            )
+
+
+def _draw_respingos(page, rect, cor, morph):
+    """Adiciona pequenos respingos/manchas de tinta dentro e ao redor do
+    carimbo — simula vazamento da borracha."""
+    n = random.randint(_RESPINGOS_MIN, _RESPINGOS_MAX)
+    margem_externa = 5.0
+
+    for _ in range(n):
+        # Respingos predominantemente fora ou perto da borda
+        if random.random() < 0.7:
+            # Perto de algum dos lados
+            lado = random.choice(["top", "bottom", "left", "right"])
+            if lado == "top":
+                x = random.uniform(rect.x0 - margem_externa, rect.x1 + margem_externa)
+                y = random.uniform(rect.y0 - margem_externa, rect.y0 + 6)
+            elif lado == "bottom":
+                x = random.uniform(rect.x0 - margem_externa, rect.x1 + margem_externa)
+                y = random.uniform(rect.y1 - 6, rect.y1 + margem_externa)
+            elif lado == "left":
+                x = random.uniform(rect.x0 - margem_externa, rect.x0 + 6)
+                y = random.uniform(rect.y0 - margem_externa, rect.y1 + margem_externa)
+            else:
+                x = random.uniform(rect.x1 - 6, rect.x1 + margem_externa)
+                y = random.uniform(rect.y0 - margem_externa, rect.y1 + margem_externa)
+        else:
+            # Disperso pelo carimbo
+            x = random.uniform(rect.x0 - margem_externa, rect.x1 + margem_externa)
+            y = random.uniform(rect.y0 - margem_externa, rect.y1 + margem_externa)
+
+        raio = random.uniform(0.25, 1.1)
+        op = random.uniform(0.30, 0.75)
+
+        page.draw_circle(
+            fitz.Point(x, y),
+            radius=raio,
+            color=cor,
+            fill=cor,
+            stroke_opacity=op,
+            fill_opacity=op,
+            morph=morph,
+        )
 
 
 # ─── Logica de carimbagem ──────────────────────────────────────────────────
@@ -75,14 +170,16 @@ def _carimbar_pagina(page: fitz.Page) -> None:
 
     caixa = fitz.Rect(x0, y0, x1, y1)
 
-    # Rotacao sutil aleatoria em torno do centro do carimbo
+    # Rotacao aleatoria em torno do centro do carimbo
     angulo = random.uniform(-_ROT_MAX, _ROT_MAX)
     centro = fitz.Point((x0 + x1) / 2, (y0 + y1) / 2)
     morph = (centro, fitz.Matrix(1, 1).prerotate(angulo))
 
-    # Retangulo: sem fundo (transparente) + borda azul (tinta de carimbo)
-    page.draw_rect(caixa, color=_COR_TINTA, fill=None, width=_BORDA_W,
-                   morph=morph, stroke_opacity=_OPACIDADE)
+    # Borda irregular com falhas de tinta
+    _draw_borda_irregular(page, caixa, _COR_TINTA, morph)
+
+    # Pequenos respingos de tinta ao redor
+    _draw_respingos(page, caixa, _COR_TINTA, morph)
 
     # Centraliza verticalmente o grupo das 3 linhas dentro da caixa
     conteudo_h = _H_L1 + _GAP + _H_L2 + _GAP + _H_L3
@@ -96,15 +193,21 @@ def _carimbar_pagina(page: fitz.Page) -> None:
     r2 = fitz.Rect(tx0, sy, tx1, sy + _H_L2);  sy += _H_L2 + _GAP
     r3 = fitz.Rect(tx0, sy, tx1, sy + _H_L3)
 
+    # Cada linha de texto ganha uma opacidade levemente diferente —
+    # algumas letras "saem" mais claras, como num carimbo de borracha.
+    op1 = random.uniform(_TEXTO_OP_MIN, _TEXTO_OP_MAX)
+    op2 = random.uniform(_TEXTO_OP_MIN, _TEXTO_OP_MAX)
+    op3 = random.uniform(_TEXTO_OP_MIN, _TEXTO_OP_MAX)
+
     page.insert_textbox(r1, _LINHA1, fontname=_FONTE, fontsize=_FS1,
                         color=_COR_TINTA, align=1, morph=morph,
-                        fill_opacity=_OPACIDADE)
+                        fill_opacity=op1)
     page.insert_textbox(r2, _LINHA2, fontname=_FONTE, fontsize=_FS2,
                         color=_COR_TINTA, align=1, morph=morph,
-                        fill_opacity=_OPACIDADE)
+                        fill_opacity=op2)
     page.insert_textbox(r3, _LINHA3, fontname=_FONTE, fontsize=_FS2,
                         color=_COR_TINTA, align=1, morph=morph,
-                        fill_opacity=_OPACIDADE)
+                        fill_opacity=op3)
 
 
 def _aplicar_carimbo(pdf_bytes: bytes) -> bytes:
