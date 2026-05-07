@@ -45,22 +45,32 @@ _H_L3     = 16.0              # altura alocada para linha 3
 _GAP      = 3.0               # espacamento entre blocos de linha
 
 # Aparencia de carimbo manual (simula carimbo de borracha aplicado a mao)
-_COR_TINTA      = (0.0, 0.18, 0.55)   # azul escuro — cor tipica de tinta de carimbo
-_OPACIDADE_BASE = 0.78                # opacidade media da tinta (varia por elemento)
-_BORDA_W        = 1.6                 # largura media da borda
-_ROT_MAX        = 3.5                 # rotacao maxima em graus (±) — manual e mais visivel
+_COR_TINTA      = (0.0, 0.15, 0.50)   # azul escuro saturado — tinta de carimbo
+_BORDA_W        = 1.7                 # largura media da borda
+_ROT_MAX        = 2.5                 # rotacao maxima em graus (±)
 
 # Parametros de "imperfeicao" — fazem o carimbo parecer borracha aplicada a mao
-_BORDA_SEG_PT      = 2.8              # comprimento medio de cada segmento da borda (pt)
-_BORDA_FALHA_PROB  = 0.12             # chance de cada segmento "nao pegar" (falha de tinta)
-_BORDA_OP_MIN      = 0.45             # opacidade minima de um segmento
-_BORDA_OP_MAX      = 0.95             # opacidade maxima de um segmento
-_BORDA_W_MIN       = 0.9              # largura minima por segmento
-_BORDA_W_MAX       = 2.1              # largura maxima por segmento
-_RESPINGOS_MIN     = 6                # numero minimo de respingos de tinta
-_RESPINGOS_MAX     = 16               # numero maximo de respingos
-_TEXTO_OP_MIN      = 0.62             # opacidade minima do texto
-_TEXTO_OP_MAX      = 0.90             # opacidade maxima do texto
+_BORDA_SEG_PT      = 2.5              # comprimento medio de cada segmento da borda (pt)
+_BORDA_FALHA_PROB  = 0.08             # chance de cada segmento "nao pegar" (falha de tinta)
+_BORDA_OP_MIN      = 0.65             # opacidade minima de um segmento
+_BORDA_OP_MAX      = 1.00             # opacidade maxima de um segmento
+_BORDA_W_MIN       = 1.1              # largura minima por segmento
+_BORDA_W_MAX       = 2.6              # largura maxima por segmento (acumulo de tinta)
+_BORDA_SPOT_PROB   = 0.06             # chance de "engrossamento" pontual na borda
+
+# Sombra/sangramento da tinta absorvida pelo papel
+_BLEED_BORDA_W     = 4.5              # largura da sombra borrada da borda
+_BLEED_BORDA_OP    = 0.16             # opacidade da sombra (bem fraca)
+_BLEED_TEXTO_OFFSET = 0.4             # offset (pt) da sombra do texto
+_BLEED_TEXTO_OP    = 0.28             # opacidade da sombra do texto
+
+# Respingos
+_RESPINGOS_MIN     = 4
+_RESPINGOS_MAX     = 12
+
+# Texto principal — bem marcado, com leve variacao por linha
+_TEXTO_OP_MIN      = 0.88
+_TEXTO_OP_MAX      = 1.00
 
 
 # ─── Helpers de aparencia manual ────────────────────────────────────────────
@@ -68,7 +78,8 @@ _TEXTO_OP_MAX      = 0.90             # opacidade maxima do texto
 def _draw_borda_irregular(page, rect, cor, morph):
     """Desenha o retangulo da borda como dezenas de segmentos curtos com
     falhas, variando largura e opacidade — simula a tinta da borracha que
-    nao toca o papel uniformemente."""
+    nao toca o papel uniformemente. Tambem aplica sombra de sangramento
+    da tinta absorvida pelo papel."""
     lados = [
         ((rect.x0, rect.y0), (rect.x1, rect.y0)),  # top
         ((rect.x1, rect.y0), (rect.x1, rect.y1)),  # right
@@ -76,12 +87,24 @@ def _draw_borda_irregular(page, rect, cor, morph):
         ((rect.x0, rect.y1), (rect.x0, rect.y0)),  # left
     ]
 
+    # Primeiro passe: sombra borrada por baixo (simula tinta sangrando no papel)
+    for (xs, ys), (xe, ye) in lados:
+        page.draw_line(
+            fitz.Point(xs, ys),
+            fitz.Point(xe, ye),
+            color=cor,
+            width=_BLEED_BORDA_W,
+            stroke_opacity=_BLEED_BORDA_OP,
+            morph=morph,
+        )
+
+    # Segundo passe: a borda em si, segmentada e irregular
     for (xs, ys), (xe, ye) in lados:
         comprimento = ((xe - xs) ** 2 + (ye - ys) ** 2) ** 0.5
         n_segs = max(8, int(comprimento / _BORDA_SEG_PT))
 
         for i in range(n_segs):
-            # Falha de tinta: simplesmente nao desenha esse segmento
+            # Falha de tinta: nao desenha esse segmento
             if random.random() < _BORDA_FALHA_PROB:
                 continue
 
@@ -92,8 +115,13 @@ def _draw_borda_irregular(page, rect, cor, morph):
             x2 = xs + (xe - xs) * t2
             y2 = ys + (ye - ys) * t2
 
-            op = random.uniform(_BORDA_OP_MIN, _BORDA_OP_MAX)
-            w = random.uniform(_BORDA_W_MIN, _BORDA_W_MAX)
+            # Acumulo pontual de tinta: alguns segmentos saem mais grossos e opacos
+            if random.random() < _BORDA_SPOT_PROB:
+                op = 1.0
+                w = random.uniform(_BORDA_W_MAX, _BORDA_W_MAX + 0.8)
+            else:
+                op = random.uniform(_BORDA_OP_MIN, _BORDA_OP_MAX)
+                w = random.uniform(_BORDA_W_MIN, _BORDA_W_MAX)
 
             page.draw_line(
                 fitz.Point(x1, y1),
@@ -199,15 +227,32 @@ def _carimbar_pagina(page: fitz.Page) -> None:
     op2 = random.uniform(_TEXTO_OP_MIN, _TEXTO_OP_MAX)
     op3 = random.uniform(_TEXTO_OP_MIN, _TEXTO_OP_MAX)
 
-    page.insert_textbox(r1, _LINHA1, fontname=_FONTE, fontsize=_FS1,
-                        color=_COR_TINTA, align=1, morph=morph,
-                        fill_opacity=op1)
-    page.insert_textbox(r2, _LINHA2, fontname=_FONTE, fontsize=_FS2,
-                        color=_COR_TINTA, align=1, morph=morph,
-                        fill_opacity=op2)
-    page.insert_textbox(r3, _LINHA3, fontname=_FONTE, fontsize=_FS2,
-                        color=_COR_TINTA, align=1, morph=morph,
-                        fill_opacity=op3)
+    # Sombra de sangramento da tinta: cada linha e desenhada antes com leve
+    # offset e opacidade baixa (simula tinta absorvida pelo papel ao redor
+    # das letras). Em seguida, o texto principal por cima.
+    def _texto_com_sangramento(rect_, texto, fontsize, op):
+        offsets = [(_BLEED_TEXTO_OFFSET, 0), (0, _BLEED_TEXTO_OFFSET),
+                   (-_BLEED_TEXTO_OFFSET * 0.5, _BLEED_TEXTO_OFFSET * 0.5)]
+        for dx, dy in offsets:
+            sombra = fitz.Rect(
+                rect_.x0 + dx, rect_.y0 + dy,
+                rect_.x1 + dx, rect_.y1 + dy,
+            )
+            page.insert_textbox(
+                sombra, texto, fontname=_FONTE, fontsize=fontsize,
+                color=_COR_TINTA, align=1, morph=morph,
+                fill_opacity=_BLEED_TEXTO_OP,
+            )
+        # Texto principal, marcado, por cima
+        page.insert_textbox(
+            rect_, texto, fontname=_FONTE, fontsize=fontsize,
+            color=_COR_TINTA, align=1, morph=morph,
+            fill_opacity=op,
+        )
+
+    _texto_com_sangramento(r1, _LINHA1, _FS1, op1)
+    _texto_com_sangramento(r2, _LINHA2, _FS2, op2)
+    _texto_com_sangramento(r3, _LINHA3, _FS2, op3)
 
 
 def _aplicar_carimbo(pdf_bytes: bytes) -> bytes:
