@@ -34,6 +34,8 @@ MAPA_CATEGORIAS_FINANCIADOR = {
     "material didatico": "F Outras despesas e H Projecto",
     "passagem aerea": "A Transporte",
     "passagem de onibus": "A Transporte",
+    "pedagios": "A Transporte",
+    "pedagio": "A Transporte",
     "notebooks/computador": "D Fornecimentos",
     "energia": "D Fornecimentos",
     "internet": "D Fornecimentos",
