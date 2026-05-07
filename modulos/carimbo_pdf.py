@@ -9,7 +9,7 @@ Carimbo:
   Linha 2 — PRO-2025K2/0002
   Linha 3 — BRASIL
 
-Tamanho: ~8,8 cm x 2,6 cm | Posicao: canto inferior direito, margem 1 cm
+Tamanho: ~8,8 cm x 2,6 cm | Posicao: centro da pagina (com leve jitter)
 Biblioteca: PyMuPDF (fitz)
 """
 
@@ -26,7 +26,8 @@ import streamlit as st
 _CM       = 28.3465          # pontos por centimetro (1 inch = 72 pt; 1 cm = 72/2.54)
 _LARG     = 8.8 * _CM        # largura  ~249.4 pt
 _ALT      = 2.6 * _CM        # altura   ~73.7 pt
-_MARG     = 1.0 * _CM        # margem   ~28.3 pt
+_MARG     = 1.0 * _CM        # margem   ~28.3 pt (usada apenas como referencia)
+_JITTER_CENTRO = 8.0          # variacao maior no centro (~3 mm) para parecer manual
 
 _LINHA1   = "Financiado pela AGENCIA VASCA DE COOPERACIÓN AL DESARROLLO (AVCD)"
 _LINHA2   = "PRO-2025K2/0002"
@@ -62,14 +63,15 @@ def _carimbar_pagina(page: fitz.Page) -> None:
     pw = page.rect.width
     ph = page.rect.height
 
-    # Pequena variacao de posicao por pagina (~1 mm por eixo)
-    jx = random.uniform(-_JITTER, _JITTER)
-    jy = random.uniform(-_JITTER, _JITTER)
+    # Variacao de posicao por pagina (~3 mm por eixo) para parecer carimbo manual
+    jx = random.uniform(-_JITTER_CENTRO, _JITTER_CENTRO)
+    jy = random.uniform(-_JITTER_CENTRO, _JITTER_CENTRO)
 
-    x0 = pw - _MARG - _LARG + jx
-    y0 = ph - _MARG - _ALT + jy
-    x1 = pw - _MARG + jx
-    y1 = ph - _MARG + jy
+    # Posicao base: centralizado na pagina
+    x0 = (pw - _LARG) / 2 + jx
+    y0 = (ph - _ALT) / 2 + jy
+    x1 = x0 + _LARG
+    y1 = y0 + _ALT
 
     caixa = fitz.Rect(x0, y0, x1, y1)
 
@@ -217,7 +219,8 @@ def render() -> None:
         st.caption(
             "Aparencia de carimbo manual: tinta azul, leve rotacao e "
             "variacao de posicao em cada pagina. "
-            "Posicao: canto inferior direito, margem de ~1 cm das bordas."
+            "Posicao: centralizado na pagina, com pequenas variacoes para "
+            "simular um carimbo aplicado a mao."
         )
 
     # ── Botao de processamento ───────────────────────────────────────────────

@@ -824,20 +824,25 @@ def render():
             if data_min is None or data_max is None:
                 st.info("Nenhuma despesa cadastrada para exportar.")
             else:
+                hoje = date.today()
+                # Default sugere o range das despesas, mas o usuario pode
+                # escolher qualquer data (inclusive hoje, mesmo que ainda
+                # nao haja lancamento naquele dia).
+                limite_max = max(data_max, hoje)
                 col_de, col_ate = st.columns(2)
                 data_ini_xlsx = col_de.date_input(
                     "De",
                     value=data_min,
-                    min_value=data_min,
-                    max_value=data_max,
+                    min_value=date(2020, 1, 1),
+                    max_value=limite_max,
                     key="xlsx_data_ini",
                     format="DD/MM/YYYY",
                 )
                 data_fim_xlsx = col_ate.date_input(
                     "Ate",
-                    value=data_max,
-                    min_value=data_min,
-                    max_value=data_max,
+                    value=limite_max,
+                    min_value=date(2020, 1, 1),
+                    max_value=limite_max,
                     key="xlsx_data_fim",
                     format="DD/MM/YYYY",
                 )
