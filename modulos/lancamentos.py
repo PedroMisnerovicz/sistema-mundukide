@@ -409,6 +409,60 @@ _REEMB_ITENS_KEY = "reemb_novo_itens"  # lista de dicts em session_state
 _REEMB_TEMPLATE_LINHAS = 30  # numero de linhas em branco no template Excel
 
 
+def _opcoes_excel_categorias(opcoes_cat: dict) -> dict:
+    """Mapeia categorias para labels simplificados (sem o prefixo de centro de custo).
+
+    Quando o mesmo nome de categoria aparece em mais de um centro de custo,
+    desambigua *somente* essas categorias com sufixo '(CC)' para evitar gravar
+    no centro de custo errado.
+
+    Recebe o dict {'CC | Nome': id} usado no resto do sistema e retorna
+    {label_simplificado: id}.
+    """
+    parsed = []
+    contagem_nomes = {}
+    for label, cat_id in opcoes_cat.items():
+        if " | " in label:
+            cc, nome = label.split(" | ", 1)
+        else:
+            cc, nome = "", label
+        parsed.append((cc, nome, cat_id))
+        contagem_nomes[nome] = contagem_nomes.get(nome, 0) + 1
+
+    resultado = {}
+    for cc, nome, cat_id in parsed:
+        label = f"{nome} ({cc})" if contagem_nomes[nome] > 1 and cc else nome
+        resultado[label] = cat_id
+    return resultado
+
+
+def _resolver_categoria_excel(valor_celula, opcoes_cat: dict, opcoes_excel: dict):
+    """Resolve o id da categoria a partir do que o usuario escreveu na planilha.
+
+    Aceita:
+      - Label simplificado novo (ex: 'Pedagios' ou 'Combustivel (A2)')
+      - Label antigo 'CC | Nome' (compatibilidade com planilhas anteriores)
+      - Match case-insensitive como ultimo recurso
+    """
+    if valor_celula is None:
+        return None
+    s = str(valor_celula).strip()
+    if not s:
+        return None
+    if s in opcoes_excel:
+        return opcoes_excel[s]
+    if s in opcoes_cat:
+        return opcoes_cat[s]
+    s_lower = s.lower()
+    for label, cid in opcoes_excel.items():
+        if label.lower() == s_lower:
+            return cid
+    for label, cid in opcoes_cat.items():
+        if label.lower() == s_lower:
+            return cid
+    return None
+
+
 def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
     """Gera planilha Excel para preenchimento manual do reembolso.
 
@@ -468,7 +522,7 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
 
     headers = [
         "Fornecedor/Cliente",
-        "Categoria (CC | Nome)",
+        "Categoria",
         "Descricao",
         "Data de Emissao",
         "Valor (R$)",
@@ -496,14 +550,17 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
         ws.cell(row=linha, column=4).alignment = centro
         ws.cell(row=linha, column=5).number_format = '"R$" #,##0.00'
 
+    opcoes_excel = _opcoes_excel_categorias(opcoes_cat)
+    labels_excel = sorted(opcoes_excel.keys(), key=lambda s: s.lower())
+
     ws2 = wb.create_sheet("Categorias")
     ws2["A1"] = "Categorias validas (NAO EDITAR)"
     ws2["A1"].font = bold
     ws2.column_dimensions["A"].width = 60
-    for idx, label in enumerate(opcoes_cat.keys(), start=2):
+    for idx, label in enumerate(labels_excel, start=2):
         ws2.cell(row=idx, column=1, value=label)
 
-    n = len(opcoes_cat)
+    n = len(labels_excel)
     if n > 0:
         formula = f"=Categorias!$A$2:$A${n + 1}"
         dv = DataValidation(type="list", formula1=formula, allow_blank=True)
@@ -594,6 +651,9 @@ def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict):
     if not beneficiario:
         return False, "Campo 'Beneficiario' (celula B4) esta vazio."
 
+    opcoes_excel = _opcoes_excel_categorias(opcoes_cat)
+    cat_id_para_label_antigo = {cid: label for label, cid in opcoes_cat.items()}
+
     itens = []
     erros = []
     linha = 8
@@ -610,9 +670,12 @@ def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict):
 
         data_dt = _parse_data_emissao(data_raw)
         valor_dec = _parse_valor_reembolso(valor_raw)
+        cat_id_resolvido = _resolver_categoria_excel(cat_s, opcoes_cat, opcoes_excel)
 
-        if cat_s not in opcoes_cat:
-            erros.append(f"Linha {linha}: categoria '{cat_s or '(vazia)'}' nao existe no sistema.")
+        if cat_id_resolvido is None:
+            erros.append(
+                f"Linha {linha}: categoria '{cat_s or '(vazia)'}' nao existe no sistema."
+            )
             linha += 1
             continue
         if data_dt is None:
@@ -624,10 +687,15 @@ def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict):
             linha += 1
             continue
 
+        # Usa o label completo 'CC | Nome' na revisao no Streamlit, para o
+        # responsavel financeiro enxergar em qual centro de custo a despesa
+        # vai cair antes de salvar.
+        label_revisao = cat_id_para_label_antigo.get(cat_id_resolvido, cat_s)
+
         itens.append({
             "fornecedor": forn_s or beneficiario,
-            "cat_label": cat_s,
-            "cat_id": opcoes_cat[cat_s],
+            "cat_label": label_revisao,
+            "cat_id": cat_id_resolvido,
             "valor": valor_dec,
             "data_emissao": data_dt,
             "descricao": desc_s,
