@@ -490,10 +490,17 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
     centro = Alignment(horizontal="center", vertical="center", wrap_text=True)
     esquerda = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
+    NUM_COLS = 4  # Fornecedor, Categoria, Data, Valor
+    col_data = 3
+    col_valor = 4
+    linha_headers = 6
+    inicio_linhas = linha_headers + 1
+    fim_linhas = inicio_linhas + _REEMB_TEMPLATE_LINHAS - 1
+
     ws["A1"] = "FORMULARIO DE REEMBOLSO"
     ws["A1"].font = Font(bold=True, size=16)
     ws["A1"].alignment = centro
-    ws.merge_cells("A1:E1")
+    ws.merge_cells("A1:D1")
 
     ws["A2"] = (
         "Preencha os campos abaixo. Apos preencher, importe este arquivo no sistema "
@@ -501,54 +508,43 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
     )
     ws["A2"].font = italic_pequeno
     ws["A2"].alignment = esquerda
-    ws.merge_cells("A2:E2")
+    ws.merge_cells("A2:D2")
     ws.row_dimensions[2].height = 28
 
     ws["A4"] = "Beneficiario:"
     ws["A4"].font = bold
     ws["A4"].fill = cinza_claro
     ws["A4"].border = border_celula
-    for col in range(2, 6):
+    for col in range(2, NUM_COLS + 1):
         ws.cell(row=4, column=col).border = border_celula
-    ws.merge_cells("B4:E4")
-
-    ws["A5"] = "Observacao:"
-    ws["A5"].font = bold
-    ws["A5"].fill = cinza_claro
-    ws["A5"].border = border_celula
-    for col in range(2, 6):
-        ws.cell(row=5, column=col).border = border_celula
-    ws.merge_cells("B5:E5")
+    ws.merge_cells("B4:D4")
 
     headers = [
         "Fornecedor/Cliente",
         "Categoria",
-        "Descricao",
         "Data de Emissao",
         "Valor (R$)",
     ]
     for col_idx, h in enumerate(headers, start=1):
-        cell = ws.cell(row=7, column=col_idx, value=h)
+        cell = ws.cell(row=linha_headers, column=col_idx, value=h)
         cell.font = branco_bold
         cell.fill = azul
         cell.alignment = centro
         cell.border = border_celula
-    ws.row_dimensions[7].height = 32
+    ws.row_dimensions[linha_headers].height = 32
 
-    larguras = {1: 30, 2: 36, 3: 38, 4: 18, 5: 16}
+    larguras = {1: 32, 2: 36, 3: 18, 4: 16}
     for col, w in larguras.items():
         ws.column_dimensions[get_column_letter(col)].width = w
 
-    inicio_linhas = 8
-    fim_linhas = inicio_linhas + _REEMB_TEMPLATE_LINHAS - 1
     for linha in range(inicio_linhas, fim_linhas + 1):
-        for col in range(1, 6):
+        for col in range(1, NUM_COLS + 1):
             c = ws.cell(row=linha, column=col)
             c.border = border_celula
             c.alignment = esquerda
-        ws.cell(row=linha, column=4).number_format = "DD/MM/YYYY"
-        ws.cell(row=linha, column=4).alignment = centro
-        ws.cell(row=linha, column=5).number_format = '"R$" #,##0.00'
+        ws.cell(row=linha, column=col_data).number_format = "DD/MM/YYYY"
+        ws.cell(row=linha, column=col_data).alignment = centro
+        ws.cell(row=linha, column=col_valor).number_format = '"R$" #,##0.00'
 
     opcoes_excel = _opcoes_excel_categorias(opcoes_cat)
     labels_excel = sorted(opcoes_excel.keys(), key=lambda s: s.lower())
@@ -573,7 +569,7 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
         ws.add_data_validation(dv)
         dv.add(f"B{inicio_linhas}:B{fim_linhas}")
 
-    ws.freeze_panes = ws.cell(row=8, column=1)
+    ws.freeze_panes = ws.cell(row=inicio_linhas, column=1)
 
     buffer = BytesIO()
     wb.save(buffer)
@@ -646,7 +642,6 @@ def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict):
         return str(v).strip()
 
     beneficiario = _str_celula(ws["B4"].value)
-    observacao = _str_celula(ws["B5"].value)
 
     if not beneficiario:
         return False, "Campo 'Beneficiario' (celula B4) esta vazio."
@@ -656,17 +651,16 @@ def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict):
 
     itens = []
     erros = []
-    linha = 8
+    linha = 7
     LIMITE = 1000
     while linha <= LIMITE:
-        celulas = [ws.cell(row=linha, column=c).value for c in range(1, 6)]
+        celulas = [ws.cell(row=linha, column=c).value for c in range(1, 5)]
         if all(v in (None, "") for v in celulas):
             break
 
-        forn_raw, cat_raw, desc_raw, data_raw, valor_raw = celulas
+        forn_raw, cat_raw, data_raw, valor_raw = celulas
         forn_s = _str_celula(forn_raw)
         cat_s = _str_celula(cat_raw)
-        desc_s = _str_celula(desc_raw)
 
         data_dt = _parse_data_emissao(data_raw)
         valor_dec = _parse_valor_reembolso(valor_raw)
@@ -698,7 +692,7 @@ def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict):
             "cat_id": cat_id_resolvido,
             "valor": valor_dec,
             "data_emissao": data_dt,
-            "descricao": desc_s,
+            "descricao": "",
         })
         linha += 1
 
@@ -710,7 +704,6 @@ def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict):
 
     st.session_state[_REEMB_ITENS_KEY] = itens
     st.session_state["reemb_beneficiario_pending"] = beneficiario
-    st.session_state["reemb_obs_pending"] = observacao
 
     msg = f"{len(itens)} despesa(s) importada(s) com sucesso."
     if erros:
