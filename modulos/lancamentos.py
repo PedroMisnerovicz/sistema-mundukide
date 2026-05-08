@@ -493,7 +493,7 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
     NUM_COLS = 4  # Fornecedor, Categoria, Data, Valor
     col_data = 3
     col_valor = 4
-    linha_headers = 6
+    linha_headers = 7
     inicio_linhas = linha_headers + 1
     fim_linhas = inicio_linhas + _REEMB_TEMPLATE_LINHAS - 1
 
@@ -518,6 +518,15 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
     for col in range(2, NUM_COLS + 1):
         ws.cell(row=4, column=col).border = border_celula
     ws.merge_cells("B4:D4")
+
+    ws["A5"] = "CPF:"
+    ws["A5"].font = bold
+    ws["A5"].fill = cinza_claro
+    ws["A5"].border = border_celula
+    for col in range(2, NUM_COLS + 1):
+        ws.cell(row=5, column=col).border = border_celula
+    ws["B5"].number_format = "@"  # texto, preserva zeros a esquerda
+    ws.merge_cells("B5:D5")
 
     headers = [
         "Fornecedor/Cliente",
@@ -651,7 +660,8 @@ def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict):
 
     itens = []
     erros = []
-    linha = 7
+    # Tabela comeca na linha 8 (linha 5 e o CPF, controle interno, ignorado).
+    linha = 8
     LIMITE = 1000
     while linha <= LIMITE:
         celulas = [ws.cell(row=linha, column=c).value for c in range(1, 5)]
