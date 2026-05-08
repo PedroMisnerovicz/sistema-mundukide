@@ -519,7 +519,7 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
         ws.cell(row=4, column=col).border = border_celula
     ws.merge_cells("B4:D4")
 
-    ws["A5"] = "CPF:"
+    ws["A5"] = "CPF/CNPJ:"
     ws["A5"].font = bold
     ws["A5"].fill = cinza_claro
     ws["A5"].border = border_celula
@@ -527,6 +527,15 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
         ws.cell(row=5, column=col).border = border_celula
     ws["B5"].number_format = "@"  # texto, preserva zeros a esquerda
     ws.merge_cells("B5:D5")
+
+    ws["A6"] = "PIX:"
+    ws["A6"].font = bold
+    ws["A6"].fill = cinza_claro
+    ws["A6"].border = border_celula
+    for col in range(2, NUM_COLS + 1):
+        ws.cell(row=6, column=col).border = border_celula
+    ws["B6"].number_format = "@"  # texto (preserva CPF, telefone, email, chave aleatoria)
+    ws.merge_cells("B6:D6")
 
     headers = [
         "Fornecedor/Cliente",
@@ -660,7 +669,8 @@ def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict):
 
     itens = []
     erros = []
-    # Tabela comeca na linha 8 (linha 5 e o CPF, controle interno, ignorado).
+    # Tabela comeca na linha 8. Linhas 5 (CPF/CNPJ) e 6 (PIX) sao apenas
+    # controle interno do beneficiario e nao entram no Streamlit.
     linha = 8
     LIMITE = 1000
     while linha <= LIMITE:
