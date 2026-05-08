@@ -36,6 +36,7 @@ MAPA_CATEGORIAS_FINANCIADOR = {
     "passagem de onibus": "A Transporte",
     "pedagios": "A Transporte",
     "pedagio": "A Transporte",
+    "taxi": "A Transporte",
     "notebooks/computador": "D Fornecimentos",
     "energia": "D Fornecimentos",
     "internet": "D Fornecimentos",
