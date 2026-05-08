@@ -6,8 +6,9 @@ Depois serao "casados" com transacoes bancarias na conciliacao mensal.
 Inclui funcionalidade de lancamentos recorrentes.
 """
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from io import BytesIO
 
 import pandas as pd
 import streamlit as st
@@ -405,13 +406,256 @@ def _aba_lista(session):
 # ──────────────── aba: reembolsos ──────────────────────────
 
 _REEMB_ITENS_KEY = "reemb_novo_itens"  # lista de dicts em session_state
+_REEMB_TEMPLATE_LINHAS = 30  # numero de linhas em branco no template Excel
+
+
+def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
+    """Gera planilha Excel para preenchimento manual do reembolso.
+
+    Estrutura:
+      - Aba 'Reembolso': cabecalho (Beneficiario, Observacao) + tabela de despesas.
+      - Aba 'Categorias': lista de categorias validas do sistema (referencia).
+      - Validacao de dados (dropdown) na coluna Categoria apontando para a aba Categorias.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Reembolso"
+
+    azul = PatternFill("solid", fgColor="305496")
+    cinza_claro = PatternFill("solid", fgColor="EEF2F7")
+    branco_bold = Font(bold=True, color="FFFFFF")
+    bold = Font(bold=True)
+    italic_pequeno = Font(italic=True, size=10, color="555555")
+    thin = Side(border_style="thin", color="BBBBBB")
+    border_celula = Border(left=thin, right=thin, top=thin, bottom=thin)
+    centro = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    esquerda = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    ws["A1"] = "FORMULARIO DE REEMBOLSO"
+    ws["A1"].font = Font(bold=True, size=16)
+    ws["A1"].alignment = centro
+    ws.merge_cells("A1:E1")
+
+    ws["A2"] = (
+        "Preencha os campos abaixo. Apos preencher, importe este arquivo no sistema "
+        "(Lancamentos > Reembolsos > Novo Reembolso > Importar Excel)."
+    )
+    ws["A2"].font = italic_pequeno
+    ws["A2"].alignment = esquerda
+    ws.merge_cells("A2:E2")
+    ws.row_dimensions[2].height = 28
+
+    ws["A4"] = "Beneficiario:"
+    ws["A4"].font = bold
+    ws["A4"].fill = cinza_claro
+    ws["A4"].border = border_celula
+    for col in range(2, 6):
+        ws.cell(row=4, column=col).border = border_celula
+    ws.merge_cells("B4:E4")
+
+    ws["A5"] = "Observacao:"
+    ws["A5"].font = bold
+    ws["A5"].fill = cinza_claro
+    ws["A5"].border = border_celula
+    for col in range(2, 6):
+        ws.cell(row=5, column=col).border = border_celula
+    ws.merge_cells("B5:E5")
+
+    headers = [
+        "Fornecedor/Cliente",
+        "Categoria (CC | Nome)",
+        "Descricao",
+        "Data de Emissao",
+        "Valor (R$)",
+    ]
+    for col_idx, h in enumerate(headers, start=1):
+        cell = ws.cell(row=7, column=col_idx, value=h)
+        cell.font = branco_bold
+        cell.fill = azul
+        cell.alignment = centro
+        cell.border = border_celula
+    ws.row_dimensions[7].height = 32
+
+    larguras = {1: 30, 2: 36, 3: 38, 4: 18, 5: 16}
+    for col, w in larguras.items():
+        ws.column_dimensions[get_column_letter(col)].width = w
+
+    inicio_linhas = 8
+    fim_linhas = inicio_linhas + _REEMB_TEMPLATE_LINHAS - 1
+    for linha in range(inicio_linhas, fim_linhas + 1):
+        for col in range(1, 6):
+            c = ws.cell(row=linha, column=col)
+            c.border = border_celula
+            c.alignment = esquerda
+        ws.cell(row=linha, column=4).number_format = "DD/MM/YYYY"
+        ws.cell(row=linha, column=4).alignment = centro
+        ws.cell(row=linha, column=5).number_format = '"R$" #,##0.00'
+
+    ws2 = wb.create_sheet("Categorias")
+    ws2["A1"] = "Categorias validas (NAO EDITAR)"
+    ws2["A1"].font = bold
+    ws2.column_dimensions["A"].width = 60
+    for idx, label in enumerate(opcoes_cat.keys(), start=2):
+        ws2.cell(row=idx, column=1, value=label)
+
+    n = len(opcoes_cat)
+    if n > 0:
+        formula = f"=Categorias!$A$2:$A${n + 1}"
+        dv = DataValidation(type="list", formula1=formula, allow_blank=True)
+        dv.error = "Categoria invalida. Selecione uma da lista."
+        dv.errorTitle = "Categoria invalida"
+        dv.prompt = "Selecione uma categoria da lista."
+        dv.promptTitle = "Categoria"
+        dv.showErrorMessage = True
+        dv.showInputMessage = True
+        ws.add_data_validation(dv)
+        dv.add(f"B{inicio_linhas}:B{fim_linhas}")
+
+    ws.freeze_panes = ws.cell(row=8, column=1)
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def _parse_data_emissao(valor):
+    """Aceita date, datetime ou string em formatos comuns. Retorna date ou None."""
+    if valor in (None, ""):
+        return None
+    if isinstance(valor, datetime):
+        return valor.date()
+    if isinstance(valor, date):
+        return valor
+    if isinstance(valor, str):
+        for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(valor.strip(), fmt).date()
+            except ValueError:
+                continue
+    return None
+
+
+def _parse_valor_reembolso(valor):
+    """Aceita numero ou string monetaria (R$, formato BR). Retorna Decimal ou None."""
+    if valor in (None, ""):
+        return None
+    if isinstance(valor, (int, float, Decimal)):
+        try:
+            return Decimal(str(valor))
+        except InvalidOperation:
+            return None
+    if isinstance(valor, str):
+        s = valor.strip().replace("R$", "").replace(" ", "")
+        if "," in s and "." in s:
+            s = s.replace(".", "").replace(",", ".")
+        elif "," in s:
+            s = s.replace(",", ".")
+        try:
+            return Decimal(s)
+        except InvalidOperation:
+            return None
+    return None
+
+
+def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict):
+    """Le o Excel preenchido e popula st.session_state com beneficiario/observacao/itens.
+
+    Retorna (ok: bool, mensagem: str).
+    """
+    from openpyxl import load_workbook
+
+    try:
+        wb = load_workbook(arquivo, data_only=True)
+    except Exception as e:
+        return False, f"Erro ao abrir o Excel: {e}"
+
+    if "Reembolso" not in wb.sheetnames:
+        return False, (
+            "O arquivo nao contem a aba 'Reembolso'. "
+            "Use o template oficial baixado pelo sistema."
+        )
+    ws = wb["Reembolso"]
+
+    def _str_celula(v):
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            return v.strip()
+        return str(v).strip()
+
+    beneficiario = _str_celula(ws["B4"].value)
+    observacao = _str_celula(ws["B5"].value)
+
+    if not beneficiario:
+        return False, "Campo 'Beneficiario' (celula B4) esta vazio."
+
+    itens = []
+    erros = []
+    linha = 8
+    LIMITE = 1000
+    while linha <= LIMITE:
+        celulas = [ws.cell(row=linha, column=c).value for c in range(1, 6)]
+        if all(v in (None, "") for v in celulas):
+            break
+
+        forn_raw, cat_raw, desc_raw, data_raw, valor_raw = celulas
+        forn_s = _str_celula(forn_raw)
+        cat_s = _str_celula(cat_raw)
+        desc_s = _str_celula(desc_raw)
+
+        data_dt = _parse_data_emissao(data_raw)
+        valor_dec = _parse_valor_reembolso(valor_raw)
+
+        if cat_s not in opcoes_cat:
+            erros.append(f"Linha {linha}: categoria '{cat_s or '(vazia)'}' nao existe no sistema.")
+            linha += 1
+            continue
+        if data_dt is None:
+            erros.append(f"Linha {linha}: data de emissao invalida ou ausente.")
+            linha += 1
+            continue
+        if valor_dec is None or valor_dec <= 0:
+            erros.append(f"Linha {linha}: valor invalido ('{valor_raw}').")
+            linha += 1
+            continue
+
+        itens.append({
+            "fornecedor": forn_s or beneficiario,
+            "cat_label": cat_s,
+            "cat_id": opcoes_cat[cat_s],
+            "valor": valor_dec,
+            "data_emissao": data_dt,
+            "descricao": desc_s,
+        })
+        linha += 1
+
+    if not itens:
+        msg = "Nenhuma despesa valida encontrada no arquivo."
+        if erros:
+            msg += " Detalhes: " + " | ".join(erros[:5])
+        return False, msg
+
+    st.session_state[_REEMB_ITENS_KEY] = itens
+    st.session_state["reemb_beneficiario_pending"] = beneficiario
+    st.session_state["reemb_obs_pending"] = observacao
+
+    msg = f"{len(itens)} despesa(s) importada(s) com sucesso."
+    if erros:
+        msg += f" {len(erros)} linha(s) ignorada(s): " + " | ".join(erros[:5])
+    return True, msg
 
 
 def _aba_reembolsos(session):
     st.subheader("Reembolsos")
     st.caption(
         "Um reembolso agrupa varias despesas pagas a uma mesma pessoa em um unico debito bancario. "
-        "As despesas internas continuam somando nos centros de custo e categorias corretos."
+        "As despesas internas continuam somando nos centros de custo e categorias corretos. "
+        "Em 'Novo Reembolso' voce pode preencher manualmente OU importar um Excel preenchido pelo beneficiario."
     )
 
     sub_novo, sub_lista = st.tabs(["Novo Reembolso", "Reembolsos Registrados"])
@@ -429,6 +673,61 @@ def _reemb_novo(session):
     if not opcoes_cat:
         st.warning("Cadastre categorias de despesa antes de criar reembolsos.")
         return
+
+    # Aplica valores pendentes vindos do import Excel (DEVE vir antes dos widgets).
+    if "reemb_beneficiario_pending" in st.session_state:
+        st.session_state["reemb_beneficiario"] = st.session_state.pop(
+            "reemb_beneficiario_pending"
+        )
+    if "reemb_obs_pending" in st.session_state:
+        st.session_state["reemb_obs"] = st.session_state.pop("reemb_obs_pending")
+
+    # Bloco de import/export Excel
+    with st.expander("Importar/Exportar Excel de Reembolso", expanded=False):
+        st.caption(
+            "Use o template Excel para a pessoa preencher manualmente as despesas. "
+            "Depois, importe o arquivo aqui para carregar tudo de uma vez. "
+            "Voce pode revisar e ajustar antes de salvar."
+        )
+        col_dl, col_up = st.columns(2)
+
+        with col_dl:
+            st.markdown("**1. Baixar template em branco**")
+            try:
+                xlsx_bytes = _gerar_template_excel_reembolso(opcoes_cat)
+                st.download_button(
+                    "Baixar template (.xlsx)",
+                    data=xlsx_bytes,
+                    file_name="template_reembolso.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="btn_dl_template_reemb",
+                )
+            except Exception as e:
+                st.error(f"Erro ao gerar template: {e}")
+
+        with col_up:
+            st.markdown("**2. Importar Excel preenchido**")
+            arquivo_xlsx = st.file_uploader(
+                "Selecione o Excel preenchido",
+                type=["xlsx"],
+                key="upload_reemb_xlsx",
+            )
+            if arquivo_xlsx is not None:
+                arq_id = f"{arquivo_xlsx.name}|{arquivo_xlsx.size}"
+                if st.session_state.get("reemb_xlsx_processado_id") != arq_id:
+                    ok, msg = _importar_template_excel_reembolso(
+                        arquivo_xlsx, opcoes_cat
+                    )
+                    if ok:
+                        st.session_state["reemb_xlsx_processado_id"] = arq_id
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+            else:
+                st.session_state.pop("reemb_xlsx_processado_id", None)
+
+    st.markdown("---")
 
     # Cabecalho do reembolso
     col1, col2 = st.columns(2)
