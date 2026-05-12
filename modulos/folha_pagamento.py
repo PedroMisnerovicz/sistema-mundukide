@@ -863,14 +863,15 @@ def _aba_calculo(session):
 
     # Exportacao PDF
     st.markdown("---")
-    col_lang, col_exp, col_dl, _ = st.columns([1, 1, 1, 3])
+    col_lang, col_exp, col_dl, _ = st.columns(
+        [1, 1, 1, 3], vertical_alignment="bottom",
+    )
     with col_lang:
         idioma_folha = st.selectbox(
             "Idioma do PDF", ["Portugues", "Espanhol"], key="idioma_folha_pdf",
         )
         lang_code = "pt" if idioma_folha == "Portugues" else "es"
     with col_exp:
-        st.markdown("&nbsp;", unsafe_allow_html=True)  # alinha com label do selectbox
         if st.button("Exportar PDF", type="secondary", key="btn_export_folha"):
             pdf_bytes = _gerar_pdf_folha(session, lang_code, ano_ref, mes_ref, nota=nota_pdf)
             st.session_state["folha_pdf"] = pdf_bytes
@@ -878,7 +879,6 @@ def _aba_calculo(session):
             st.rerun()
     if "folha_pdf" in st.session_state:
         with col_dl:
-            st.markdown("&nbsp;", unsafe_allow_html=True)  # alinha com label do selectbox
             st.download_button(
                 "Baixar PDF",
                 data=st.session_state["folha_pdf"],
