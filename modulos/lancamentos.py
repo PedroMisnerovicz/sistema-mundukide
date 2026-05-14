@@ -16,6 +16,7 @@ from sqlalchemy import func as sqlfunc
 
 from database import get_session
 from models import (
+    Atividade,
     CentroCusto,
     CategoriaDespesa,
     ItemDespesa,
@@ -27,6 +28,43 @@ from modulos.cache_utils import (
     cambio_medio_cached,
     opcoes_categorias as opcoes_categorias_cached,
 )
+
+
+# Label vazio do dropdown de atividade: representa "sem atividade".
+_ATIV_VAZIO = "— sem atividade —"
+
+
+def _opcoes_atividades(session):
+    """Retorna dict {label: id} de atividades para uso em dropdowns.
+
+    Label = 'A.X.Y — descricao curta (max 90 chars)' para caber em selectbox.
+    Inclui um item vazio no topo para permitir 'sem atividade'.
+    """
+    atividades = (
+        session.query(Atividade)
+        .order_by(Atividade.ordem, Atividade.codigo)
+        .all()
+    )
+    out = {_ATIV_VAZIO: None}
+    for a in atividades:
+        desc = (a.descricao_pt or "").strip()
+        if len(desc) > 90:
+            desc = desc[:87] + "..."
+        out[f"{a.codigo} — {desc}"] = a.id
+    return out
+
+
+def _label_atividade(session, atividade_id):
+    """Retorna o label do dropdown para uma atividade ja salva (ou _ATIV_VAZIO)."""
+    if not atividade_id:
+        return _ATIV_VAZIO
+    a = session.get(Atividade, atividade_id)
+    if not a:
+        return _ATIV_VAZIO
+    desc = (a.descricao_pt or "").strip()
+    if len(desc) > 90:
+        desc = desc[:87] + "..."
+    return f"{a.codigo} — {desc}"
 
 
 def _to_decimal(valor, fallback=Decimal("0.00")):
@@ -139,6 +177,7 @@ def _aba_novo(session):
     st.caption("Lance a despesa agora. Depois, na conciliacao mensal, vincule ao extrato OFX.")
 
     opcoes_cat = _opcoes_categorias(session)
+    opcoes_ativ = _opcoes_atividades(session)
 
     with st.form("form_lancamento", clear_on_submit=True):
         col1, col2 = st.columns(2)
@@ -148,6 +187,13 @@ def _aba_novo(session):
             key="lanc_fornecedor",
         )
         cat_sel = col2.selectbox("Categoria *", list(opcoes_cat.keys()), key="lanc_cat")
+
+        ativ_sel = st.selectbox(
+            "Atividade do projeto (A.X.Y)",
+            list(opcoes_ativ.keys()),
+            key="lanc_ativ",
+            help="Codigo da atividade exigido pelo financiador. Aparece na descricao do Excel exportado.",
+        )
 
         col3, col4 = st.columns(2)
         data_emissao = col3.date_input(
@@ -165,8 +211,8 @@ def _aba_novo(session):
             format="%.2f", key="lanc_valor",
         )
         descricao = col6.text_input(
-            "Descricao *", max_chars=255,
-            placeholder="Ex: Compra de materiais escritorio",
+            "Descricao (opcional)", max_chars=255,
+            placeholder="Anotacao interna — nao aparece no Excel do financiador",
             key="lanc_desc",
         )
 
@@ -202,12 +248,11 @@ def _aba_novo(session):
         enviar = st.form_submit_button("Registrar Lancamento", type="primary")
 
     if enviar:
-        if not descricao.strip():
-            st.error("Descricao e obrigatoria.")
-        elif not fornecedor.strip():
+        if not fornecedor.strip():
             st.error("Fornecedor/Cliente e obrigatorio.")
         else:
             cat_id = opcoes_cat[cat_sel]
+            ativ_id = opcoes_ativ.get(ativ_sel)
 
             # Verifica teto da categoria (usa data de pagamento como referencia)
             alerta = _verificar_teto_categoria(session, cat_id, valor, data_pagamento)
@@ -222,6 +267,7 @@ def _aba_novo(session):
             item = ItemDespesa(
                 transacao_bancaria_id=None,
                 categoria_despesa_id=cat_id,
+                atividade_id=ativ_id,
                 valor_brl=_to_decimal(valor),
                 descricao=descricao.strip(),
                 fornecedor_cliente=fornecedor.strip(),
@@ -302,6 +348,7 @@ def _aba_lista(session):
             "Descricao": item.descricao or "—",
             "Centro de Custo": cat.centro_custo.codigo,
             "Categoria": cat.nome,
+            "Atividade": item.atividade.codigo if item.atividade else "—",
             "Valor": f"R$ {item.valor_brl:,.2f}",
             "Status": "Conciliado" if item.conciliado else "Pendente",
         })
@@ -337,6 +384,7 @@ def _aba_lista(session):
     item_obj = session.get(ItemDespesa, item_id)
 
     opcoes_cat = _opcoes_categorias(session)
+    opcoes_ativ = _opcoes_atividades(session)
 
     col_ed, col_del = st.columns([3, 1])
 
@@ -368,6 +416,14 @@ def _aba_lista(session):
                 index=idx_cat, key=f"lanc_cat_ed_{item_id}",
             )
 
+            ativ_atual_label = _label_atividade(session, item_obj.atividade_id)
+            ativ_keys = list(opcoes_ativ.keys())
+            idx_ativ = ativ_keys.index(ativ_atual_label) if ativ_atual_label in opcoes_ativ else 0
+            ativ_ed = st.selectbox(
+                "Atividade do projeto (A.X.Y)", ativ_keys,
+                index=idx_ativ, key=f"lanc_ativ_ed_{item_id}",
+            )
+
             col_ve, col_de = st.columns(2)
             valor_ed = col_ve.number_input(
                 "Valor (R$)", value=float(item_obj.valor_brl),
@@ -375,7 +431,7 @@ def _aba_lista(session):
                 key=f"lanc_valor_ed_{item_id}",
             )
             desc_ed = col_de.text_input(
-                "Descricao", value=item_obj.descricao or "",
+                "Descricao (opcional)", value=item_obj.descricao or "",
                 key=f"lanc_desc_ed_{item_id}",
             )
             salvar = st.form_submit_button("Atualizar")
@@ -389,6 +445,7 @@ def _aba_lista(session):
                 item_obj.data_pagamento = data_pag_ed
                 item_obj.data = data_pag_ed
                 item_obj.categoria_despesa_id = opcoes_cat[cat_ed]
+                item_obj.atividade_id = opcoes_ativ.get(ativ_ed)
                 item_obj.valor_brl = _to_decimal(valor_ed)
                 item_obj.descricao = desc_ed.strip()
                 session.commit()
@@ -463,13 +520,14 @@ def _resolver_categoria_excel(valor_celula, opcoes_cat: dict, opcoes_excel: dict
     return None
 
 
-def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
+def _gerar_template_excel_reembolso(opcoes_cat: dict, atividades: list | None = None) -> bytes:
     """Gera planilha Excel para preenchimento manual do reembolso.
 
     Estrutura:
-      - Aba 'Reembolso': cabecalho (Beneficiario, Observacao) + tabela de despesas.
+      - Aba 'Reembolso': cabecalho (Beneficiario, CPF, PIX) + tabela de despesas.
       - Aba 'Categorias': lista de categorias validas do sistema (referencia).
-      - Validacao de dados (dropdown) na coluna Categoria apontando para a aba Categorias.
+      - Aba 'Atividades': lista de codigos A.X.Y validos com descricao PT-BR.
+      - Validacao de dados (dropdown) na coluna Categoria e na coluna Atividade.
     """
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -490,9 +548,10 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
     centro = Alignment(horizontal="center", vertical="center", wrap_text=True)
     esquerda = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
-    NUM_COLS = 4  # Fornecedor, Categoria, Data, Valor
-    col_data = 3
-    col_valor = 4
+    NUM_COLS = 5  # Fornecedor, Categoria, Atividade, Data, Valor
+    col_ativ = 3
+    col_data = 4
+    col_valor = 5
     linha_headers = 7
     inicio_linhas = linha_headers + 1
     fim_linhas = inicio_linhas + _REEMB_TEMPLATE_LINHAS - 1
@@ -500,7 +559,7 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
     ws["A1"] = "FORMULARIO DE REEMBOLSO"
     ws["A1"].font = Font(bold=True, size=16)
     ws["A1"].alignment = centro
-    ws.merge_cells("A1:D1")
+    ws.merge_cells("A1:E1")
 
     ws["A2"] = (
         "Preencha os campos abaixo. Apos preencher, importe este arquivo no sistema "
@@ -508,7 +567,7 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
     )
     ws["A2"].font = italic_pequeno
     ws["A2"].alignment = esquerda
-    ws.merge_cells("A2:D2")
+    ws.merge_cells("A2:E2")
     ws.row_dimensions[2].height = 28
 
     ws["A4"] = "Beneficiario:"
@@ -517,7 +576,7 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
     ws["A4"].border = border_celula
     for col in range(2, NUM_COLS + 1):
         ws.cell(row=4, column=col).border = border_celula
-    ws.merge_cells("B4:D4")
+    ws.merge_cells("B4:E4")
 
     ws["A5"] = "CPF/CNPJ:"
     ws["A5"].font = bold
@@ -526,7 +585,7 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
     for col in range(2, NUM_COLS + 1):
         ws.cell(row=5, column=col).border = border_celula
     ws["B5"].number_format = "@"  # texto, preserva zeros a esquerda
-    ws.merge_cells("B5:D5")
+    ws.merge_cells("B5:E5")
 
     ws["A6"] = "PIX:"
     ws["A6"].font = bold
@@ -535,11 +594,12 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
     for col in range(2, NUM_COLS + 1):
         ws.cell(row=6, column=col).border = border_celula
     ws["B6"].number_format = "@"  # texto (preserva CPF, telefone, email, chave aleatoria)
-    ws.merge_cells("B6:D6")
+    ws.merge_cells("B6:E6")
 
     headers = [
         "Fornecedor/Cliente",
         "Categoria",
+        "Atividade (A.X.Y)",
         "Data de Emissao",
         "Valor (R$)",
     ]
@@ -551,7 +611,7 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
         cell.border = border_celula
     ws.row_dimensions[linha_headers].height = 32
 
-    larguras = {1: 32, 2: 36, 3: 18, 4: 16}
+    larguras = {1: 32, 2: 36, 3: 14, 4: 18, 5: 16}
     for col, w in larguras.items():
         ws.column_dimensions[get_column_letter(col)].width = w
 
@@ -560,6 +620,7 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
             c = ws.cell(row=linha, column=col)
             c.border = border_celula
             c.alignment = esquerda
+        ws.cell(row=linha, column=col_ativ).alignment = centro
         ws.cell(row=linha, column=col_data).number_format = "DD/MM/YYYY"
         ws.cell(row=linha, column=col_data).alignment = centro
         ws.cell(row=linha, column=col_valor).number_format = '"R$" #,##0.00'
@@ -586,6 +647,30 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict) -> bytes:
         dv.showInputMessage = True
         ws.add_data_validation(dv)
         dv.add(f"B{inicio_linhas}:B{fim_linhas}")
+
+    # Aba de Atividades + dropdown na coluna C
+    ws3 = wb.create_sheet("Atividades")
+    ws3["A1"] = "Codigo"
+    ws3["B1"] = "Descricao (PT-BR)"
+    ws3["A1"].font = bold
+    ws3["B1"].font = bold
+    ws3.column_dimensions["A"].width = 12
+    ws3.column_dimensions["B"].width = 90
+    if atividades:
+        for idx, a in enumerate(atividades, start=2):
+            ws3.cell(row=idx, column=1, value=a.codigo)
+            ws3.cell(row=idx, column=2, value=a.descricao_pt or "")
+        m = len(atividades)
+        formula_a = f"=Atividades!$A$2:$A${m + 1}"
+        dv_a = DataValidation(type="list", formula1=formula_a, allow_blank=True)
+        dv_a.error = "Codigo de atividade invalido. Selecione um da aba 'Atividades'."
+        dv_a.errorTitle = "Atividade invalida"
+        dv_a.prompt = "Selecione o codigo A.X.Y (consulte a aba 'Atividades' para a descricao)."
+        dv_a.promptTitle = "Atividade do projeto"
+        dv_a.showErrorMessage = True
+        dv_a.showInputMessage = True
+        ws.add_data_validation(dv_a)
+        dv_a.add(f"C{inicio_linhas}:C{fim_linhas}")
 
     ws.freeze_panes = ws.cell(row=inicio_linhas, column=1)
 
@@ -633,7 +718,7 @@ def _parse_valor_reembolso(valor):
     return None
 
 
-def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict):
+def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict, atividades_por_codigo: dict | None = None):
     """Le o Excel preenchido e popula st.session_state com beneficiario/observacao/itens.
 
     Retorna (ok: bool, mensagem: str).
@@ -666,6 +751,11 @@ def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict):
 
     opcoes_excel = _opcoes_excel_categorias(opcoes_cat)
     cat_id_para_label_antigo = {cid: label for label, cid in opcoes_cat.items()}
+    atividades_por_codigo = atividades_por_codigo or {}
+
+    # Detecta layout: novo (5 colunas com Atividade na C) ou antigo (4 colunas).
+    header_c7 = _str_celula(ws.cell(row=7, column=3).value).lower()
+    layout_novo = "atividade" in header_c7
 
     itens = []
     erros = []
@@ -674,17 +764,34 @@ def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict):
     linha = 8
     LIMITE = 1000
     while linha <= LIMITE:
-        celulas = [ws.cell(row=linha, column=c).value for c in range(1, 5)]
+        num_cols = 6 if layout_novo else 5
+        celulas = [ws.cell(row=linha, column=c).value for c in range(1, num_cols)]
         if all(v in (None, "") for v in celulas):
             break
 
-        forn_raw, cat_raw, data_raw, valor_raw = celulas
+        if layout_novo:
+            forn_raw, cat_raw, ativ_raw, data_raw, valor_raw = celulas
+        else:
+            forn_raw, cat_raw, data_raw, valor_raw = celulas
+            ativ_raw = None
+
         forn_s = _str_celula(forn_raw)
         cat_s = _str_celula(cat_raw)
+        ativ_s = _str_celula(ativ_raw)
 
         data_dt = _parse_data_emissao(data_raw)
         valor_dec = _parse_valor_reembolso(valor_raw)
         cat_id_resolvido = _resolver_categoria_excel(cat_s, opcoes_cat, opcoes_excel)
+
+        # Resolve codigo de atividade (aceita 'A.2.1' ou 'A.2.1 — descricao')
+        ativ_id_resolvido = None
+        if ativ_s:
+            codigo_limpo = ativ_s.split(" ")[0].split("—")[0].strip().upper()
+            ativ_id_resolvido = atividades_por_codigo.get(codigo_limpo)
+            if ativ_id_resolvido is None:
+                erros.append(
+                    f"Linha {linha}: codigo de atividade '{ativ_s}' nao encontrado."
+                )
 
         if cat_id_resolvido is None:
             erros.append(
@@ -710,6 +817,8 @@ def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict):
             "fornecedor": forn_s or beneficiario,
             "cat_label": label_revisao,
             "cat_id": cat_id_resolvido,
+            "ativ_id": ativ_id_resolvido,
+            "ativ_label": ativ_s or _ATIV_VAZIO,
             "valor": valor_dec,
             "data_emissao": data_dt,
             "descricao": "",
@@ -751,6 +860,7 @@ def _aba_reembolsos(session):
 def _reemb_novo(session):
     """Formulario para criar um reembolso com N despesas internas."""
     opcoes_cat = _opcoes_categorias(session)
+    opcoes_ativ = _opcoes_atividades(session)
     if not opcoes_cat:
         st.warning("Cadastre categorias de despesa antes de criar reembolsos.")
         return
@@ -772,10 +882,17 @@ def _reemb_novo(session):
         )
         col_dl, col_up = st.columns(2)
 
+        atividades_list = (
+            session.query(Atividade)
+            .order_by(Atividade.ordem, Atividade.codigo)
+            .all()
+        )
+        atividades_por_codigo = {a.codigo: a.id for a in atividades_list}
+
         with col_dl:
             st.markdown("**1. Baixar template em branco**")
             try:
-                xlsx_bytes = _gerar_template_excel_reembolso(opcoes_cat)
+                xlsx_bytes = _gerar_template_excel_reembolso(opcoes_cat, atividades_list)
                 st.download_button(
                     "Baixar template (.xlsx)",
                     data=xlsx_bytes,
@@ -797,7 +914,7 @@ def _reemb_novo(session):
                 arq_id = f"{arquivo_xlsx.name}|{arquivo_xlsx.size}"
                 if st.session_state.get("reemb_xlsx_processado_id") != arq_id:
                     ok, msg = _importar_template_excel_reembolso(
-                        arquivo_xlsx, opcoes_cat
+                        arquivo_xlsx, opcoes_cat, atividades_por_codigo,
                     )
                     if ok:
                         st.session_state["reemb_xlsx_processado_id"] = arq_id
@@ -850,6 +967,13 @@ def _reemb_novo(session):
             "Categoria *", list(opcoes_cat.keys()), key="reemb_item_cat",
         )
 
+        ativ_item = st.selectbox(
+            "Atividade do projeto (A.X.Y)",
+            list(opcoes_ativ.keys()),
+            key="reemb_item_ativ",
+            help="Codigo da atividade exigido pelo financiador.",
+        )
+
         col_c, col_d = st.columns(2)
         valor_item = col_c.number_input(
             "Valor (R$) *", min_value=0.01, step=10.0,
@@ -861,8 +985,8 @@ def _reemb_novo(session):
         )
 
         desc_item = st.text_input(
-            "Descricao", max_chars=255,
-            placeholder="Ex: Almoco com cliente",
+            "Descricao (opcional)", max_chars=255,
+            placeholder="Anotacao interna — nao aparece no Excel do financiador",
             key="reemb_item_desc",
         )
 
@@ -878,6 +1002,8 @@ def _reemb_novo(session):
                 "fornecedor": (forn_item or beneficiario or "").strip(),
                 "cat_label": cat_item,
                 "cat_id": opcoes_cat[cat_item],
+                "ativ_id": opcoes_ativ.get(ativ_item),
+                "ativ_label": ativ_item,
                 "valor": _to_decimal(valor_item),
                 "data_emissao": data_emi_item,
                 "descricao": (desc_item or "").strip(),
@@ -890,8 +1016,14 @@ def _reemb_novo(session):
         st.markdown("**Itens adicionados:**")
         for idx, it in enumerate(itens):
             col_n, col_v, col_x = st.columns([5, 2, 1])
+            ativ_id_it = it.get("ativ_id")
+            ativ_codigo = ""
+            if ativ_id_it:
+                a = session.get(Atividade, ativ_id_it)
+                if a:
+                    ativ_codigo = f" | {a.codigo}"
             col_n.write(
-                f"**{it['fornecedor'] or '—'}** — {it['cat_label']} | "
+                f"**{it['fornecedor'] or '—'}** — {it['cat_label']}{ativ_codigo} | "
                 f"emissao: {it['data_emissao']}"
                 + (f" | {it['descricao']}" if it['descricao'] else "")
             )
@@ -945,6 +1077,7 @@ def _reemb_novo(session):
             for it in itens:
                 item = ItemDespesa(
                     categoria_despesa_id=it["cat_id"],
+                    atividade_id=it.get("ativ_id"),
                     reembolso_id=reembolso.id,
                     valor_brl=it["valor"],
                     descricao=it["descricao"],
@@ -1001,6 +1134,7 @@ def _reemb_lista(session):
     st.markdown("---")
 
     opcoes_cat = _opcoes_categorias(session)
+    opcoes_ativ = _opcoes_atividades(session)
 
     for r in reembolsos:
         icone = "✅" if r.conciliado else "⏳"
@@ -1021,6 +1155,7 @@ def _reemb_lista(session):
                     "Fornecedor/Cliente": it.fornecedor_cliente or "—",
                     "Centro de Custo": cat.centro_custo.codigo,
                     "Categoria": cat.nome,
+                    "Atividade": it.atividade.codigo if it.atividade else "—",
                     "Descricao": it.descricao or "—",
                     "Data Emissao": str(it.data_emissao) if it.data_emissao else "—",
                     "Valor": f"R$ {it.valor_brl:,.2f}",
@@ -1085,6 +1220,11 @@ def _reemb_lista(session):
                     "Categoria", list(opcoes_cat.keys()),
                     key=f"reemb_ai_cat_{r.id}",
                 )
+                ativ_ai = st.selectbox(
+                    "Atividade do projeto (A.X.Y)",
+                    list(opcoes_ativ.keys()),
+                    key=f"reemb_ai_ativ_{r.id}",
+                )
                 col_ai3, col_ai4 = st.columns(2)
                 valor_ai = col_ai3.number_input(
                     "Valor (R$)", min_value=0.01, step=10.0,
@@ -1095,7 +1235,7 @@ def _reemb_lista(session):
                     key=f"reemb_ai_data_emi_{r.id}",
                 )
                 desc_ai = st.text_input(
-                    "Descricao", max_chars=255,
+                    "Descricao (opcional)", max_chars=255,
                     key=f"reemb_ai_desc_{r.id}",
                 )
                 add_ai = st.form_submit_button("Adicionar despesa")
@@ -1103,6 +1243,7 @@ def _reemb_lista(session):
             if add_ai:
                 novo = ItemDespesa(
                     categoria_despesa_id=opcoes_cat[cat_ai],
+                    atividade_id=opcoes_ativ.get(ativ_ai),
                     reembolso_id=r.id,
                     valor_brl=_to_decimal(valor_ai),
                     descricao=(desc_ai or "").strip(),

@@ -155,6 +155,10 @@ def _apply_migrations():
                     conn.execute(text(
                         "ALTER TABLE itens_despesa ADD COLUMN lancamento_recorrente_id INTEGER"
                     ))
+                if "atividade_id" not in cols_item:
+                    conn.execute(text(
+                        "ALTER TABLE itens_despesa ADD COLUMN atividade_id INTEGER"
+                    ))
 
                 # Backfill: data_pagamento = data para registros antigos
                 conn.execute(text(
@@ -167,8 +171,54 @@ def _apply_migrations():
         pass
 
 
+# Catalogo fixo das 14 atividades do projeto 349 (Mundukide).
+# Codigo, resultado, descricao PT-BR.
+_ATIVIDADES_PROJETO_349 = [
+    ("A.1.1", "R1", "Realizacao do curso Tecnico em Cooperativismo (TAC) para 20 pessoas (10F e 10M) de cooperativas vinculadas a assentamentos e areas da reforma agraria das cadeias produtivas de graos e sementes."),
+    ("A.1.2", "R1", "Realizacao de 4 seminarios tematicos nas areas de gestao para 80 pessoas (40F e 40M)."),
+    ("A.1.3", "R1", "Realizacao de 4 seminarios sobre o Itinerario Tecnico de Producao, 2 por cadeia produtiva, para 32 pessoas (16F e 16M)."),
+    ("A.1.4", "R1", "Intercambios de boas praticas em Gestao entre 6 cooperativas (20F e 20M)."),
+    ("A.1.5", "R1", "Atividades de campo de intercambio de experiencias em tecnicas agroecologicas para 6 cooperativas (16F e 16M)."),
+    ("A.2.1", "R2", "Realizacao de 6 diagnosticos participativos das 2 cadeias produtivas acompanhadas."),
+    ("A.2.2", "R2", "Construcao de itinerarios tecnicos de producao, gestao e comercializacao para cada cadeia produtiva acompanhada."),
+    ("A.2.3", "R2", "Criacao de uma equipe nacional de acompanhamento tecnico das cadeias produtivas (2F e 2M)."),
+    ("A.2.4", "R2", "Assistencia tecnica as cadeias produtivas para aplicacao dos itinerarios e processos de intercooperacao."),
+    ("A.2.5", "R2", "Assistencia tecnica em gestao e comercializacao para 6 cooperativas."),
+    ("A.2.6", "R2", "Elaboracao de manuais de processos sobre as cadeias produtivas de graos e sementes."),
+    ("A.3.1", "R3", "Articulacao da luta pela reforma agraria do Setor de Producao, Cooperacao e Meio Ambiente em nivel estadual e nacional (11F e 11M)."),
+    ("A.3.2", "R3", "Participacao de representantes estaduais nos foruns nacionais de formacao e coordenacao do setor de genero (16F)."),
+    ("A.3.3", "R3", "Acompanhamento de processos de denuncia de violacoes de DDHH e da Natureza nos assentamentos do MST."),
+]
+
+
+def _seed_atividades():
+    """Insere as 14 atividades do projeto 349 caso ainda nao existam.
+    Idempotente: so insere os codigos que faltam. Nao sobrescreve descricoes
+    existentes (assim o usuario pode editar manualmente sem perder)."""
+    try:
+        from models import Atividade
+        session = SessionLocal()
+        try:
+            existentes = {a.codigo for a in session.query(Atividade).all()}
+            for ordem, (codigo, resultado, desc_pt) in enumerate(_ATIVIDADES_PROJETO_349, start=1):
+                if codigo in existentes:
+                    continue
+                session.add(Atividade(
+                    codigo=codigo,
+                    resultado=resultado,
+                    descricao_pt=desc_pt,
+                    ordem=ordem,
+                ))
+            session.commit()
+        finally:
+            session.close()
+    except Exception:
+        pass
+
+
 def init_db():
     """Cria todas as tabelas se nao existirem e aplica migracoes."""
     from models import Base
     Base.metadata.create_all(bind=engine)
     _apply_migrations()
+    _seed_atividades()

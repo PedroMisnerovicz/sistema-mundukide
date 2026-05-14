@@ -316,6 +316,12 @@ class ItemDespesa(Base):
         nullable=True,
         comment="Preenchido quando a despesa realiza uma projecao recorrente (ex: folha)",
     )
+    atividade_id = Column(
+        Integer,
+        ForeignKey("atividades.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="Codigo da atividade do projeto (A.X.Y) exigido pelo financiador",
+    )
     valor_brl = Column(
         Numeric(14, 2),
         nullable=False,
@@ -359,6 +365,7 @@ class ItemDespesa(Base):
     lancamento_recorrente = relationship(
         "LancamentoRecorrente", back_populates="itens_despesa_realizados",
     )
+    atividade = relationship("Atividade", back_populates="itens_despesa")
 
     @property
     def centro_custo(self):
@@ -524,3 +531,58 @@ class Reembolso(Base):
     def __repr__(self):
         status = "conciliado" if self.conciliado else "pendente"
         return f"<Reembolso {self.beneficiario} – R${self.valor_total_brl} ({status})>"
+
+
+# ─────────────────── Atividade do Projeto ──────────────────
+
+class Atividade(Base):
+    """
+    Atividade do projeto exigida pelo financiador Mundukide.
+    Cada atividade pertence a um Resultado (R1, R2 ou R3) e possui
+    um codigo unico no formato A.X.Y (ex: A.1.1, A.2.4, A.3.3).
+
+    As 14 atividades do projeto 349 sao pre-cadastradas no init_db().
+    """
+    __tablename__ = "atividades"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    codigo = Column(
+        String(10),
+        unique=True,
+        nullable=False,
+        comment="Codigo no formato A.X.Y (ex: A.1.1, A.2.3, A.3.3)",
+    )
+    resultado = Column(
+        String(4),
+        nullable=False,
+        comment="R1, R2 ou R3 — agrupamento do codigo",
+    )
+    descricao_pt = Column(
+        Text,
+        nullable=False,
+        comment="Descricao da atividade em portugues-br",
+    )
+    descricao_es = Column(
+        Text,
+        nullable=True,
+        comment="Descricao original em espanhol (referencia)",
+    )
+    ordem = Column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="Ordem de exibicao em dropdowns",
+    )
+
+    itens_despesa = relationship(
+        "ItemDespesa", back_populates="atividade", lazy="select",
+    )
+
+    def __repr__(self):
+        return f"<Atividade {self.codigo}>"
+
+    @property
+    def rotulo(self) -> str:
+        """Texto exibido em dropdowns: 'A.X.Y — descricao curta'."""
+        desc = self.descricao_pt or ""
+        return f"{self.codigo} — {desc}"

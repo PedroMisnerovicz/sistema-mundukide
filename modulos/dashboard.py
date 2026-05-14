@@ -663,10 +663,19 @@ def _gerar_xlsx_financiador(session, cambio, data_ini=None, data_fim=None):
         valor_brl = -float(item.valor_brl)
         valor_eur = (valor_brl / cambio_f) if cambio_f else 0.0
 
-        descricao = item.descricao or ""
+        # Monta descricao para o financiador no formato:
+        #   Despesa normal:    "{nome_categoria} // {CODIGO}"
+        #   Despesa reembolso: "Reembolso {beneficiario} - {nome_categoria} // {CODIGO}"
+        # Se a despesa nao tem atividade preenchida, omite " // CODIGO".
+        # O campo item.descricao (livre, anotacao interna) NAO entra mais aqui.
+        nome_cat = cat.nome or ""
         if item.reembolso and item.reembolso.beneficiario:
-            sufixo = f"Reembolso {item.reembolso.beneficiario}"
-            descricao = f"{descricao} - {sufixo}" if descricao else sufixo
+            base = f"Reembolso {item.reembolso.beneficiario} - {nome_cat}".rstrip(" -")
+        else:
+            base = nome_cat
+
+        codigo_ativ = item.atividade.codigo if item.atividade else ""
+        descricao = f"{base} // {codigo_ativ}" if codigo_ativ else base
 
         linhas.append({
             "C_CREATED_DATE": data_ref,

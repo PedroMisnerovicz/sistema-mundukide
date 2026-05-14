@@ -12,7 +12,7 @@ import streamlit as st
 from sqlalchemy import func as sqlfunc
 
 from database import get_session
-from models import CentroCusto, CategoriaDespesa, Remessa, ItemDespesa
+from models import Atividade, CentroCusto, CategoriaDespesa, Remessa, ItemDespesa
 from modulos.cache_utils import invalidar_cache_cadastros
 
 CAMBIO_PROJECAO = Decimal("6.00")
@@ -530,13 +530,80 @@ def _aba_visao_geral():
 
 # ──────────────────── render principal ──────────────────────
 
+def _aba_atividades():
+    """Lista as 14 atividades do projeto 349 (codigo + descricao PT-BR).
+
+    Edicao opcional da descricao PT-BR — util para o usuario ajustar a traducao
+    sem mexer no codigo. O codigo nao pode ser alterado para nao quebrar
+    rastreabilidade com despesas ja salvas.
+    """
+    st.subheader("Atividades do Projeto")
+    st.caption(
+        "Codigos exigidos pelo financiador (Seguimiento actividades 349). "
+        "Aparecem na descricao do Excel exportado como ' // A.X.Y'. "
+        "Voce pode editar a descricao PT-BR; o codigo e fixo."
+    )
+
+    session = get_session()
+
+    atividades = (
+        session.query(Atividade)
+        .order_by(Atividade.ordem, Atividade.codigo)
+        .all()
+    )
+
+    if not atividades:
+        st.warning("Nenhuma atividade cadastrada. Recarregue o sistema para o seed automatico.")
+        session.close()
+        return
+
+    # Tabela read-only
+    dados = []
+    for a in atividades:
+        dados.append({
+            "Resultado": a.resultado,
+            "Codigo": a.codigo,
+            "Descricao (PT-BR)": a.descricao_pt or "",
+        })
+    st.dataframe(pd.DataFrame(dados), use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.markdown("**Editar descricao PT-BR de uma atividade**")
+    opcoes = {f"{a.codigo} — {(a.descricao_pt or '')[:60]}": a.id for a in atividades}
+    sel = st.selectbox("Selecione a atividade", list(opcoes.keys()), key="sel_ativ_edit")
+    a_obj = session.get(Atividade, opcoes[sel])
+
+    with st.form(f"form_ativ_edit_{a_obj.id}"):
+        nova_desc = st.text_area(
+            "Descricao em portugues-br",
+            value=a_obj.descricao_pt or "",
+            height=120,
+            max_chars=1000,
+            key=f"ativ_desc_{a_obj.id}",
+        )
+        salvar = st.form_submit_button("Atualizar descricao", type="primary")
+
+    if salvar:
+        nova_desc = (nova_desc or "").strip()
+        if not nova_desc:
+            st.error("Descricao nao pode ficar em branco.")
+        else:
+            a_obj.descricao_pt = nova_desc
+            session.commit()
+            st.success(f"Descricao da atividade {a_obj.codigo} atualizada.")
+            st.rerun()
+
+    session.close()
+
+
 def render():
     st.title("📋 Cadastros")
 
-    tab_cc, tab_cat, tab_rem, tab_vis = st.tabs([
+    tab_cc, tab_cat, tab_rem, tab_ativ, tab_vis = st.tabs([
         "Centros de Custo",
         "Categorias de Despesas",
         "Remessas",
+        "Atividades do Projeto",
         "Visao Geral",
     ])
 
@@ -548,6 +615,9 @@ def render():
 
     with tab_rem:
         _aba_remessas()
+
+    with tab_ativ:
+        _aba_atividades()
 
     with tab_vis:
         _aba_visao_geral()
