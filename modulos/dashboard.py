@@ -622,8 +622,11 @@ def _pdf_detalhamento(pdf, session, centros, cambio, lang):
 def _gerar_xlsx_financiador(session, cambio, data_ini=None, data_fim=None):
     """Exporta despesas no formato exigido pelo financiador Mundukide.
 
-    Filtra por data_ini/data_fim (inclusivos) usando data_emissao com fallback
+    Filtra por data_ini/data_fim (inclusivos) usando data_pagamento com fallback
     para data. Se nenhum dos dois for passado, exporta todas as despesas.
+    A coluna C_CREATED_DATE do Excel continua refletindo data_emissao (com
+    fallback para data) — filtramos por quando o dinheiro saiu, mas reportamos
+    a data do documento.
 
     Formato: 21 colunas fixas (C_CREATED_DATE ... C_COF_EURO).
     Valores fixos: C_CONTRACT=M349, C_ACTIVITY=Programa Brasil,
@@ -640,16 +643,18 @@ def _gerar_xlsx_financiador(session, cambio, data_ini=None, data_fim=None):
         "C_EUR_EQUI", "C_FIN_EURO", "C_COF_EURO",
     ]
 
-    data_ref_expr = sqlfunc.coalesce(ItemDespesa.data_emissao, ItemDespesa.data)
+    data_filtro_expr = sqlfunc.coalesce(
+        ItemDespesa.data_pagamento, ItemDespesa.data,
+    )
     query = (
         session.query(ItemDespesa)
         .join(CategoriaDespesa)
         .join(CentroCusto)
     )
     if data_ini is not None:
-        query = query.filter(data_ref_expr >= data_ini)
+        query = query.filter(data_filtro_expr >= data_ini)
     if data_fim is not None:
-        query = query.filter(data_ref_expr <= data_fim)
+        query = query.filter(data_filtro_expr <= data_fim)
     itens = query.order_by(
         ItemDespesa.data_emissao, ItemDespesa.data, ItemDespesa.id,
     ).all()
@@ -821,9 +826,10 @@ def render():
             use_container_width=True,
             help="Planilha no formato exigido pelo financiador Mundukide",
         ):
-            # Range de datas com base nas despesas existentes
+            # Range de datas com base na data de pagamento (mesmo criterio
+            # usado para filtrar dentro de _gerar_xlsx_financiador).
             data_ref_expr = sqlfunc.coalesce(
-                ItemDespesa.data_emissao, ItemDespesa.data,
+                ItemDespesa.data_pagamento, ItemDespesa.data,
             )
             data_min, data_max = (
                 session.query(
@@ -836,6 +842,10 @@ def render():
             if data_min is None or data_max is None:
                 st.info("Nenhuma despesa cadastrada para exportar.")
             else:
+                st.caption(
+                    "Filtra por **data de pagamento**. No Excel, a coluna "
+                    "C_CREATED_DATE mostra a **data de emissao** do documento."
+                )
                 hoje = date.today()
                 # Default sugere o range das despesas, mas o usuario pode
                 # escolher qualquer data (inclusive hoje, mesmo que ainda
