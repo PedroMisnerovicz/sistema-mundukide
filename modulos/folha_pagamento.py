@@ -156,13 +156,6 @@ def _tf(chave: str, idioma: str = "pt") -> str:
     return TRADUCOES_FOLHA.get(idioma, TRADUCOES_FOLHA["pt"]).get(chave, chave)
 
 
-def calcular_bruto_de_custo(custo_maximo: Decimal) -> Decimal:
-    """Calculo inverso: dado o custo total maximo, retorna o salario bruto."""
-    if custo_maximo <= 0:
-        return Decimal("0.00")
-    return _q2(custo_maximo / FATOR_CUSTO_TOTAL)
-
-
 # ──────────────── Funcoes de Calculo ───────────────────────
 
 def _q2(valor: Decimal) -> Decimal:
@@ -556,43 +549,45 @@ def _aba_cadastro(session):
             nome = col1.text_input(
                 "Nome *", max_chars=120, placeholder="Ex: Joao Silva",
             )
-            custo = col2.number_input(
-                "Custo Maximo Mensal (R$) *",
+            salario = col2.number_input(
+                "Salario Bruto Mensal (R$) *",
                 min_value=0.01, step=100.0, format="%.2f",
-                help="Valor total incluindo salario + FGTS + INSS + PIS + prov. 13o + prov. ferias",
+                help="Salario bruto do funcionario. INSS, IRRF, encargos e custo total sao calculados a partir deste valor.",
             )
             data_adm = st.date_input(
                 "Data de Admissao *", value=date.today(),
             )
             enviar = st.form_submit_button("Cadastrar Tecnico")
 
-        # Preview do calculo inverso (fora do form para atualizar em tempo real)
-        if custo and custo > 0:
-            bruto_prev = calcular_bruto_de_custo(_to_decimal(custo))
+        # Preview do calculo a partir do salario bruto (fora do form para atualizar em tempo real)
+        if salario and salario > 0:
+            bruto_prev = _to_decimal(salario)
             folha_prev = calcular_folha_tecnico(bruto_prev)
-            st.caption(f"Fator de encargos: {float(FATOR_CUSTO_TOTAL):.4f}x")
+            custo_prev = _q2(bruto_prev + folha_prev["total_encargos"])
+            st.caption(f"Fator de custo total: {float(FATOR_CUSTO_TOTAL):.4f}x")
             cp1, cp2, cp3, cp4 = st.columns(4)
-            cp1.metric("Salario Bruto", f"R$ {bruto_prev:,.2f}")
-            cp2.metric("Salario Liquido", f"R$ {folha_prev['salario_liquido']:,.2f}")
+            cp1.metric("Salario Liquido", f"R$ {folha_prev['salario_liquido']:,.2f}")
+            cp2.metric("Descontos (INSS+IRRF)", f"R$ {folha_prev['total_descontos']:,.2f}")
             cp3.metric("Encargos Patronais", f"R$ {folha_prev['total_encargos']:,.2f}")
-            cp4.metric("Descontos (INSS+IRRF)", f"R$ {folha_prev['total_descontos']:,.2f}")
+            cp4.metric("Custo Total Mensal", f"R$ {custo_prev:,.2f}")
 
         if enviar:
             if not nome.strip():
                 st.error("Nome e obrigatorio.")
             else:
-                custo_dec = _to_decimal(custo)
-                bruto_calc = calcular_bruto_de_custo(custo_dec)
+                bruto_dec = _to_decimal(salario)
+                folha_calc = calcular_folha_tecnico(bruto_dec)
+                custo_calc = _q2(bruto_dec + folha_calc["total_encargos"])
                 tec = Tecnico(
                     nome=nome.strip(),
-                    custo_maximo=custo_dec,
-                    salario_bruto=bruto_calc,
+                    custo_maximo=custo_calc,
+                    salario_bruto=bruto_dec,
                     data_admissao=data_adm,
                     ativo=True,
                 )
                 session.add(tec)
                 session.commit()
-                st.success(f"Tecnico '{tec.nome}' cadastrado! Salario bruto calculado: R$ {bruto_calc:,.2f}")
+                st.success(f"Tecnico '{tec.nome}' cadastrado! Custo total mensal: R$ {custo_calc:,.2f}")
                 st.rerun()
 
     # Listagem
@@ -637,38 +632,40 @@ def _aba_cadastro(session):
     col_ed, col_del = st.columns([3, 1])
 
     with col_ed:
-        custo_atual = float(tec_obj.custo_maximo) if tec_obj.custo_maximo else float(tec_obj.salario_bruto * FATOR_CUSTO_TOTAL)
+        salario_atual = float(tec_obj.salario_bruto)
         with st.form(f"form_tec_edit_{tec_id}"):
             nome_ed = st.text_input("Nome", value=tec_obj.nome, key=f"tec_nome_{tec_id}")
-            custo_ed = st.number_input(
-                "Custo Maximo Mensal (R$)", value=custo_atual,
-                min_value=0.01, step=100.0, format="%.2f", key=f"tec_custo_{tec_id}",
-                help="Valor total incluindo salario + FGTS + INSS + PIS + prov. 13o + prov. ferias",
+            salario_ed = st.number_input(
+                "Salario Bruto Mensal (R$)", value=salario_atual,
+                min_value=0.01, step=100.0, format="%.2f", key=f"tec_salario_{tec_id}",
+                help="Salario bruto do funcionario. INSS, IRRF, encargos e custo total sao calculados a partir deste valor.",
             )
             data_ed = st.date_input(
                 "Data Admissao", value=tec_obj.data_admissao, key=f"tec_data_{tec_id}",
             )
             salvar = st.form_submit_button("Atualizar")
 
-        # Preview do calculo inverso na edicao
-        if custo_ed and custo_ed > 0:
-            bruto_ed_prev = calcular_bruto_de_custo(_to_decimal(custo_ed))
+        # Preview do calculo a partir do salario bruto na edicao
+        if salario_ed and salario_ed > 0:
+            bruto_ed_prev = _to_decimal(salario_ed)
             folha_ed_prev = calcular_folha_tecnico(bruto_ed_prev)
+            custo_ed_prev = _q2(bruto_ed_prev + folha_ed_prev["total_encargos"])
             ep1, ep2, ep3, ep4 = st.columns(4)
-            ep1.metric("Salario Bruto", f"R$ {bruto_ed_prev:,.2f}")
-            ep2.metric("Salario Liquido", f"R$ {folha_ed_prev['salario_liquido']:,.2f}")
+            ep1.metric("Salario Liquido", f"R$ {folha_ed_prev['salario_liquido']:,.2f}")
+            ep2.metric("Descontos (INSS+IRRF)", f"R$ {folha_ed_prev['total_descontos']:,.2f}")
             ep3.metric("Encargos Patronais", f"R$ {folha_ed_prev['total_encargos']:,.2f}")
-            ep4.metric("Descontos (INSS+IRRF)", f"R$ {folha_ed_prev['total_descontos']:,.2f}")
+            ep4.metric("Custo Total Mensal", f"R$ {custo_ed_prev:,.2f}")
 
         if salvar:
-            custo_dec_ed = _to_decimal(custo_ed)
-            bruto_calc_ed = calcular_bruto_de_custo(custo_dec_ed)
+            bruto_dec_ed = _to_decimal(salario_ed)
+            folha_calc_ed = calcular_folha_tecnico(bruto_dec_ed)
+            custo_calc_ed = _q2(bruto_dec_ed + folha_calc_ed["total_encargos"])
             tec_obj.nome = nome_ed.strip()
-            tec_obj.custo_maximo = custo_dec_ed
-            tec_obj.salario_bruto = bruto_calc_ed
+            tec_obj.salario_bruto = bruto_dec_ed
+            tec_obj.custo_maximo = custo_calc_ed
             tec_obj.data_admissao = data_ed
             session.commit()
-            st.success(f"Tecnico atualizado! Salario bruto: R$ {bruto_calc_ed:,.2f}")
+            st.success(f"Tecnico atualizado! Custo total mensal: R$ {custo_calc_ed:,.2f}")
             st.rerun()
 
     with col_del:
