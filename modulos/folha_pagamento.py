@@ -76,6 +76,8 @@ FATOR_CUSTO_TOTAL = (
 TRADUCOES_FOLHA = {
     "pt": {
         "titulo_pdf": "Folha de Pagamento - Projeto Mundukide",
+        "titulo_recibo": "Recibo de Encargos - Projeto Mundukide",
+        "encargos_section": "Encargos do Mes",
         "gerado_em": "Gerado em",
         "cadastro_section": "Cadastro de Tecnicos",
         "calculo_section": "Calculo Mensal",
@@ -113,6 +115,8 @@ TRADUCOES_FOLHA = {
     },
     "es": {
         "titulo_pdf": "Nomina - Proyecto Mundukide",
+        "titulo_recibo": "Recibo de Cargas Sociales - Proyecto Mundukide",
+        "encargos_section": "Cargas Sociales del Mes",
         "gerado_em": "Generado el",
         "cadastro_section": "Registro de Tecnicos",
         "calculo_section": "Calculo Mensual",
@@ -508,6 +512,119 @@ def _gerar_pdf_folha(session, idioma: str = "pt", ano_ref: int = None, mes_ref: 
     return bytes(pdf.output())
 
 
+def _gerar_pdf_encargos(session, idioma: str = "pt", ano_ref: int = None, mes_ref: int = None, nota: str = "") -> bytes:
+    """Gera recibo mensal contendo APENAS os encargos do mes (sem salarios/descontos).
+
+    Inclui os 6 encargos: INSS Patronal, FGTS, PIS, Terceiros, Provisao de Ferias
+    e Provisao de 13o — totalizando o mesmo "Total Encargos" exibido no sistema.
+    Aplica o calculo proporcional no mes de admissao.
+    """
+    t = lambda k: _tf(k, idioma)
+
+    if ano_ref is None:
+        ano_ref = date.today().year
+    if mes_ref is None:
+        mes_ref = date.today().month
+
+    tecnicos = (
+        session.query(Tecnico)
+        .filter(Tecnico.ativo == True)
+        .order_by(Tecnico.nome)
+        .all()
+    )
+
+    pdf = FPDF(orientation="L", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    # Titulo
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.cell(0, 12, t("titulo_recibo"), new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_font("Helvetica", "", 10)
+    nome_mes = _NOMES_MES.get(idioma, _NOMES_MES["pt"])[mes_ref]
+    pdf.cell(
+        0, 8,
+        f"{t('mes_referencia')}: {nome_mes} {ano_ref}  |  {t('gerado_em')}: {date.today().strftime('%d/%m/%Y')}",
+        new_x="LMARGIN", new_y="NEXT", align="C",
+    )
+    pdf.ln(5)
+
+    # ── Nota descritiva (se informada) ──
+    if nota and nota.strip():
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_text_color(44, 62, 80)
+        pdf.cell(0, 6, t("nota") + ":", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_fill_color(245, 245, 245)
+        pdf.multi_cell(0, 6, nota.strip(), border=1, fill=True)
+        pdf.ln(4)
+
+    # ── Tabela de encargos ──
+    _pdf_section(pdf, f"{t('encargos_section')} - {nome_mes} {ano_ref}")
+
+    cols = [
+        t("tecnico"), t("inss_patronal"), t("fgts"), t("pis"),
+        t("terceiros"), t("prov_ferias"), t("prov_13"), t("total_encargos"),
+    ]
+    larguras = [60, 32, 28, 22, 30, 32, 28, 35]
+    _pdf_table_header(pdf, cols, larguras)
+
+    totais = {k: Decimal("0") for k in [
+        "inss_patronal", "fgts", "pis", "terceiros",
+        "prov_ferias", "prov_13", "total_encargos",
+    ]}
+
+    for tc in tecnicos:
+        prop = calcular_proporcional(tc.salario_bruto, tc.data_admissao, ano_ref, mes_ref)
+        if prop is not None:
+            folha = prop["folha_proporcional"]
+            label = f"{tc.nome} ({t('proporcional')}: {prop['dias_trabalhados']}/{prop['dias_no_mes']} {t('dias')})"
+        else:
+            folha = calcular_folha_tecnico(tc.salario_bruto)
+            label = tc.nome
+
+        _pdf_table_row(pdf, [
+            label,
+            _fmt(folha["inss_patronal"]),
+            _fmt(folha["fgts"]),
+            _fmt(folha["pis"]),
+            _fmt(folha["terceiros"]),
+            _fmt(folha["prov_ferias"]),
+            _fmt(folha["prov_13"]),
+            _fmt(folha["total_encargos"]),
+        ], larguras)
+
+        for k in totais:
+            totais[k] += folha[k]
+
+    # Linha de totais
+    _pdf_table_row(pdf, [
+        t("total"),
+        _fmt(totais["inss_patronal"]),
+        _fmt(totais["fgts"]),
+        _fmt(totais["pis"]),
+        _fmt(totais["terceiros"]),
+        _fmt(totais["prov_ferias"]),
+        _fmt(totais["prov_13"]),
+        _fmt(totais["total_encargos"]),
+    ], larguras, bold=True)
+
+    pdf.ln(6)
+
+    # Destaque do total de encargos
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.set_text_color(44, 62, 80)
+    pdf.cell(
+        0, 10,
+        f"{t('total_encargos')}: {_fmt(totais['total_encargos'])}",
+        new_x="LMARGIN", new_y="NEXT",
+    )
+    pdf.set_text_color(0, 0, 0)
+
+    return bytes(pdf.output())
+
+
 # ──────────────── Render Principal ─────────────────────────
 
 def render():
@@ -860,30 +977,55 @@ def _aba_calculo(session):
 
     # Exportacao PDF
     st.markdown("---")
-    col_lang, col_exp, col_dl, _ = st.columns(
-        [1, 1, 1, 3], vertical_alignment="bottom",
+    st.markdown("**Exportar PDF**")
+    st.caption(
+        "PDF Completo: folha inteira (salarios, descontos e encargos). "
+        "Recibo de Encargos: apenas os encargos do mes (INSS Patronal, FGTS, "
+        "PIS, Terceiros, Provisao de Ferias e 13o)."
+    )
+    col_lang, col_full, col_enc, _ = st.columns(
+        [1.2, 1.3, 1.5, 2], vertical_alignment="bottom",
     )
     with col_lang:
         idioma_folha = st.selectbox(
             "Idioma do PDF", ["Portugues", "Espanhol"], key="idioma_folha_pdf",
         )
         lang_code = "pt" if idioma_folha == "Portugues" else "es"
-    with col_exp:
-        if st.button("Exportar PDF", type="secondary", key="btn_export_folha"):
+    with col_full:
+        if st.button("Exportar PDF Completo", type="secondary", key="btn_export_folha"):
             pdf_bytes = _gerar_pdf_folha(session, lang_code, ano_ref, mes_ref, nota=nota_pdf)
             st.session_state["folha_pdf"] = pdf_bytes
             st.session_state["folha_pdf_lang"] = lang_code
             st.rerun()
-    if "folha_pdf" in st.session_state:
-        with col_dl:
-            st.download_button(
-                "Baixar PDF",
-                data=st.session_state["folha_pdf"],
-                file_name=f"folha_pagamento_{ano_ref}{mes_ref:02d}.pdf",
-                mime="application/pdf",
-                type="primary",
-                key="btn_dl_folha_pdf",
-            )
+    with col_enc:
+        if st.button("Exportar Recibo de Encargos", type="secondary", key="btn_export_encargos"):
+            pdf_bytes = _gerar_pdf_encargos(session, lang_code, ano_ref, mes_ref, nota=nota_pdf)
+            st.session_state["encargos_pdf"] = pdf_bytes
+            st.session_state["encargos_pdf_lang"] = lang_code
+            st.rerun()
+
+    if "folha_pdf" in st.session_state or "encargos_pdf" in st.session_state:
+        col_dl1, col_dl2, _ = st.columns([1.5, 1.5, 3])
+        if "folha_pdf" in st.session_state:
+            with col_dl1:
+                st.download_button(
+                    "Baixar PDF Completo",
+                    data=st.session_state["folha_pdf"],
+                    file_name=f"folha_pagamento_{ano_ref}{mes_ref:02d}.pdf",
+                    mime="application/pdf",
+                    type="primary",
+                    key="btn_dl_folha_pdf",
+                )
+        if "encargos_pdf" in st.session_state:
+            with col_dl2:
+                st.download_button(
+                    "Baixar Recibo de Encargos",
+                    data=st.session_state["encargos_pdf"],
+                    file_name=f"recibo_encargos_{ano_ref}{mes_ref:02d}.pdf",
+                    mime="application/pdf",
+                    type="primary",
+                    key="btn_dl_encargos_pdf",
+                )
 
 
 # ─────────── Aba: Gerar Lancamentos Recorrentes ───────────
