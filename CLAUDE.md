@@ -27,7 +27,7 @@ Atue como um Engenheiro de Software Senior especialista em Python, Pandas, SQLAl
 ```
 3.SISTEMA_MUNDUKIDE/
   app.py                  # Ponto de entrada — navegacao por sidebar + tela de senha
-  models.py               # Modelos SQLAlchemy (7 entidades)
+  models.py               # Modelos SQLAlchemy (10 entidades)
   database.py             # Engine dual (PostgreSQL nuvem / SQLite local)
   mundukide.db            # SQLite local (NAO vai pro GitHub)
   requirements.txt        # Dependencias
@@ -41,6 +41,7 @@ Atue como um Engenheiro de Software Senior especialista em Python, Pandas, SQLAl
     lancamentos.py         # Lancamentos manuais de despesas
     importacao_ofx.py      # Upload e parse de extratos OFX
     conciliacao.py         # Conciliacao bancaria + splits
+    aplicacoes.py          # Aplicacao financeira + caixa consolidado
     folha_pagamento.py     # Calculo de folha com encargos BR (sem provisao de ferias/13o)
     fluxo_caixa.py         # Projecao de fluxo de caixa
     dashboard.py           # Dashboard gerencial + exportacao PDF
@@ -82,7 +83,26 @@ Atue como um Engenheiro de Software Senior especialista em Python, Pandas, SQLAl
   de referencia e dezembro, e o bloco de ferias quando ha ferias iniciadas no mes.
 - **As aliquotas nunca mudam** entre folha mensal, 13o e ferias.
 
-### 6. Conciliacao Bancaria
+### 6. Aplicacao Financeira (saldo ocioso)
+- O saldo parado em conta corrente e aplicado em **fundo/conta separada, sem OFX proprio**.
+  O extrato da conta corrente mostra apenas a aplicacao (saida) e o resgate (entrada).
+- **Aplicacao e resgate NAO sao despesa nem remessa** — o dinheiro so mudou de lugar.
+  Nao consomem teto de CC, nao entram no FIFO dos 80% e nao alteram cambio efetivado.
+  Marcados via `TransacaoBancaria.eh_aplicacao` (mesmo padrao de `eh_estorno`).
+- **Rendimento e IR/IOF** acontecem dentro do fundo, sem linha no OFX. Sao lancados
+  manualmente a partir do extrato da aplicacao.
+- **Rendimento e receita nova do projeto, mas NAO altera os tetos em EUR**, que
+  seguem inegociaveis. Fica reportado em linha separada (decisao dos diretores).
+- `saldo_aplicado = aplicacoes + rendimentos - resgates - IR/IOF`
+- `disponivel_total = saldo em conta corrente (extrato) + saldo aplicado`
+- **Duas conferencias independentes** (ambas em `modulos/aplicacoes.py`):
+  1. *Caixa*: `remessas + rendimento liquido - despesas pagas no banco` deve igualar
+     `conta corrente + aplicado`. Valida tudo que passa pela conta corrente.
+  2. *Saldo aplicado*: comparacao com o saldo informado no extrato do fundo.
+     Necessaria porque rendimento e IR/IOF entram nos **dois lados** da conferencia 1
+     e por isso jamais gerariam divergencia la.
+
+### 7. Conciliacao Bancaria
 - O projeto usa conta bancaria exclusiva.
 - Importacao OFX com deduplicacao por FITID.
 - Transacao so e marcada como conciliada quando 100% alocada.
@@ -178,7 +198,11 @@ Sidebar com radio buttons:
 2. Lancamentos
 3. Importacao OFX
 4. Conciliacao
-5. Dashboard
+5. Aplicacao Financeira
+6. Folha de Pagamento
+7. Fluxo de Caixa
+8. Dashboard
+9. Carimbo de Documentos
 
 Cada opcao carrega o `render()` do modulo correspondente.
 

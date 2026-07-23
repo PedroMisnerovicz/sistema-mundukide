@@ -42,6 +42,7 @@ MODULOS = {
     "Lancamentos": "lancamentos",
     "Importacao OFX": "importacao_ofx",
     "Conciliacao": "conciliacao",
+    "Aplicacao Financeira": "aplicacoes",
     "Folha de Pagamento": "folha_pagamento",
     "Fluxo de Caixa": "fluxo_caixa",
     "Dashboard": "dashboard",
@@ -64,6 +65,8 @@ elif modulo_nome == "importacao_ofx":
     from modulos.importacao_ofx import render
 elif modulo_nome == "conciliacao":
     from modulos.conciliacao import render
+elif modulo_nome == "aplicacoes":
+    from modulos.aplicacoes import render
 elif modulo_nome == "folha_pagamento":
     from modulos.folha_pagamento import render
 elif modulo_nome == "fluxo_caixa":

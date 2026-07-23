@@ -131,6 +131,17 @@ def _apply_migrations():
                         "ALTER TABLE transacoes_bancarias "
                         "ADD COLUMN estorno_par_id INTEGER"
                     ))
+                if "eh_aplicacao" not in cols_tx:
+                    if _is_sqlite:
+                        conn.execute(text(
+                            "ALTER TABLE transacoes_bancarias "
+                            "ADD COLUMN eh_aplicacao BOOLEAN NOT NULL DEFAULT 0"
+                        ))
+                    else:
+                        conn.execute(text(
+                            "ALTER TABLE transacoes_bancarias "
+                            "ADD COLUMN eh_aplicacao BOOLEAN NOT NULL DEFAULT FALSE"
+                        ))
 
             # ── itens_despesa (Fase 1 do refactor) ───────────
             if _tabela_existe(conn, "itens_despesa"):

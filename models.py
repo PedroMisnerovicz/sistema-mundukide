@@ -231,6 +231,14 @@ class TransacaoBancaria(Base):
         comment="True quando a transacao e um estorno (entrada ou saida) e nao "
                 "deve impactar tetos orcamentarios nem ser tratada como remessa.",
     )
+    eh_aplicacao = Column(
+        Boolean,
+        default=False,
+        nullable=False,
+        comment="True quando a transacao e movimentacao entre a conta corrente e a "
+                "aplicacao financeira (aplicar ou resgatar). Nao e despesa nem "
+                "remessa: o dinheiro apenas mudou de lugar.",
+    )
     estorno_par_id = Column(
         Integer,
         ForeignKey("transacoes_bancarias.id", ondelete="SET NULL"),
@@ -629,3 +637,68 @@ class Atividade(Base):
         """Texto exibido em dropdowns: 'A.X.Y — descricao curta'."""
         desc = self.descricao_pt or ""
         return f"{self.codigo} — {desc}"
+
+
+# ─────────────── Aplicação Financeira ──────────────────────
+
+# Tipos de movimento da aplicação financeira.
+# Sinal em relação ao SALDO APLICADO (dinheiro que está no fundo):
+#   APLICACAO  (+) saiu da conta corrente e entrou no fundo
+#   RESGATE    (-) saiu do fundo e voltou para a conta corrente
+#   RENDIMENTO (+) receita gerada pelo fundo (dinheiro novo)
+#   IR_IOF     (-) imposto retido sobre o rendimento
+TIPOS_MOVIMENTO_APLICACAO = ("APLICACAO", "RESGATE", "RENDIMENTO", "IR_IOF")
+
+# Movimentos que transitam pela conta corrente (têm linha no extrato OFX)
+TIPOS_MOVIMENTO_COM_EXTRATO = ("APLICACAO", "RESGATE")
+
+
+class MovimentoAplicacao(Base):
+    """
+    Movimento da aplicação financeira do saldo parado em conta corrente.
+
+    A aplicação fica em fundo/conta separada, sem OFX próprio: o extrato da
+    conta corrente mostra apenas a aplicação (saída) e o resgate (entrada).
+    Rendimento e IR/IOF acontecem dentro do fundo e são registrados
+    manualmente a partir do extrato da aplicação.
+
+    Regras:
+      - Aplicação e resgate NÃO são despesa nem receita — o dinheiro só mudou
+        de lugar. Não consomem teto de centro de custo nem viram remessa.
+      - Rendimento é receita nova do projeto; IR/IOF é o custo dessa receita.
+        Nenhum dos dois altera os tetos em EUR, que são inegociáveis.
+    """
+    __tablename__ = "movimentos_aplicacao"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    data = Column(Date, nullable=False)
+    tipo = Column(
+        String(20),
+        nullable=False,
+        comment="APLICACAO, RESGATE, RENDIMENTO ou IR_IOF",
+    )
+    valor_brl = Column(
+        Numeric(14, 2),
+        nullable=False,
+        comment="Valor sempre positivo — o sinal vem do tipo do movimento",
+    )
+    descricao = Column(String(255), default="")
+    transacao_bancaria_id = Column(
+        Integer,
+        ForeignKey("transacoes_bancarias.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="Linha do extrato da conta corrente correspondente "
+                "(apenas para APLICACAO e RESGATE)",
+    )
+
+    transacao_bancaria = relationship("TransacaoBancaria", lazy="joined")
+
+    def __repr__(self):
+        return f"<MovimentoAplicacao {self.tipo} {self.data} R${self.valor_brl}>"
+
+    @property
+    def efeito_no_saldo_aplicado(self) -> Decimal:
+        """Quanto este movimento soma (ou subtrai) do saldo aplicado."""
+        if self.tipo in ("APLICACAO", "RENDIMENTO"):
+            return Decimal(str(self.valor_brl))
+        return -Decimal(str(self.valor_brl))

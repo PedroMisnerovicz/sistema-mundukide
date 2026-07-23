@@ -22,6 +22,7 @@ from models import (
     CategoriaDespesa,
     ItemDespesa,
     LancamentoRecorrente,
+    MovimentoAplicacao,
     Reembolso,
     Remessa,
     TransacaoBancaria,
@@ -33,6 +34,9 @@ JANELA_MATCH_FOLHA_DIAS = 15
 
 # Tolerancia em BRL para considerar valor "igual" (arredondamentos).
 TOLERANCIA_MATCH_VALOR = Decimal("0.01")
+
+# Rotulos curtos dos movimentos de aplicacao (usados nos avisos de duplicidade).
+ROTULOS_CURTOS_CONC = {"APLICACAO": "aplicacao", "RESGATE": "resgate"}
 
 
 def _to_decimal(valor, fallback=Decimal("0.00")):
@@ -191,6 +195,74 @@ def _bloco_marcar_estorno(session, tx: TransacaoBancaria, contexto: str):
                 "Estorno marcado (sem par). Tu pode parear depois marcando "
                 "a transacao oposta."
             )
+        return True
+    return False
+
+
+def _bloco_marcar_aplicacao(session, tx: TransacaoBancaria, contexto: str):
+    """Renderiza o bloco 'Movimentacao de aplicacao financeira' para uma transacao.
+
+    contexto = 'debito' (aplicar) ou 'credito' (resgatar).
+    Cria o MovimentoAplicacao correspondente e marca a linha do extrato como
+    movimentacao de aplicacao — sem virar despesa nem remessa.
+    Retorna True se o usuario acionou a marcacao (caller deve st.rerun).
+    """
+    from modulos.aplicacoes import (
+        marcar_transacao_como_aplicacao,
+        movimentos_sem_extrato,
+    )
+
+    tipo_mov = "APLICACAO" if contexto == "debito" else "RESGATE"
+    legenda = (
+        "Use quando esta saida foi dinheiro aplicado (nao e despesa — o dinheiro "
+        "continua sendo do projeto, so mudou de lugar)."
+        if contexto == "debito"
+        else "Use quando esta entrada e resgate da aplicacao (nao e remessa — "
+        "e dinheiro do projeto voltando para a conta)."
+    )
+
+    st.markdown("**💰 Movimentacao de aplicacao financeira:**")
+    st.caption(legenda)
+
+    # Evita lancar duas vezes o mesmo movimento: se ja existe um registro do
+    # mesmo tipo e valor aguardando o extrato, o vinculo deve ser feito la.
+    ja_registrado = [
+        m for m in movimentos_sem_extrato(session)
+        if m.tipo == tipo_mov and m.valor_brl == abs(tx.valor)
+    ]
+    if ja_registrado:
+        m = ja_registrado[0]
+        st.warning(
+            f"Ja existe um movimento de {ROTULOS_CURTOS_CONC[tipo_mov]} de "
+            f"R$ {m.valor_brl:,.2f} ({m.data.strftime('%d/%m/%Y')}) registrado sem "
+            "vinculo com o extrato. Vincule em **Aplicacao Financeira > Movimentos "
+            "Registrados** em vez de criar outro aqui, senao o valor conta em dobro."
+        )
+        return False
+
+    desc = st.text_input(
+        "Descricao do movimento",
+        value=tx.descricao[:120],
+        key=f"desc_aplic_{tx.id}",
+    )
+    if st.button(
+        "Confirmar como aplicacao" if contexto == "debito" else "Confirmar como resgate",
+        key=f"btn_marcar_aplic_{tx.id}",
+    ):
+        mov = MovimentoAplicacao(
+            data=tx.data,
+            tipo=tipo_mov,
+            valor_brl=abs(tx.valor),
+            descricao=desc.strip(),
+            transacao_bancaria_id=tx.id,
+        )
+        session.add(mov)
+        marcar_transacao_como_aplicacao(session, tx)
+        session.commit()
+        st.success(
+            "Movimentacao registrada. Confira o saldo aplicado em "
+            "'Aplicacao Financeira'."
+        )
         return True
     return False
 
@@ -415,6 +487,12 @@ def _aba_debitos_pendentes(session):
                 # Apenas possivel quando nenhum split foi criado (saldo == valor total)
                 if not splits_existentes:
                     if _bloco_marcar_estorno(session, tx, contexto="debito"):
+                        st.rerun()
+                    st.markdown("---")
+
+                # ─── Fluxo F: Aplicacao financeira (saida para o fundo) ───
+                if not splits_existentes:
+                    if _bloco_marcar_aplicacao(session, tx, contexto="debito"):
                         st.rerun()
                     st.markdown("---")
 
@@ -689,9 +767,12 @@ def _aba_creditos(session):
                         "Nenhuma remessa cadastrada com valor EUR. "
                         "Verifique em Cadastros > Remessas."
                     )
-                    # Mesmo sem remessas, permite marcar estorno
+                    # Mesmo sem remessas, permite marcar estorno ou resgate
                     st.markdown("---")
                     if _bloco_marcar_estorno(session, tx, contexto="credito"):
+                        st.rerun()
+                    st.markdown("---")
+                    if _bloco_marcar_aplicacao(session, tx, contexto="credito"):
                         st.rerun()
                 else:
                     opcoes = {}
@@ -766,6 +847,11 @@ def _aba_creditos(session):
                     # Alternativa: marcar como estorno (nao e remessa)
                     st.markdown("---")
                     if _bloco_marcar_estorno(session, tx, contexto="credito"):
+                        st.rerun()
+
+                    # Alternativa: resgate da aplicacao (nao e remessa)
+                    st.markdown("---")
+                    if _bloco_marcar_aplicacao(session, tx, contexto="credito"):
                         st.rerun()
 
 # ──────────────── aba: ja conciliadas ───────────────────────
@@ -894,6 +980,58 @@ def _aba_conciliadas(session):
                         )
                     else:
                         st.info("Estorno desfeito. A transacao voltou para pendentes.")
+                    st.rerun()
+            continue
+
+        # Caso 0.5: movimentacao de APLICACAO FINANCEIRA (nao e despesa nem remessa)
+        if tx.eh_aplicacao:
+            from modulos.aplicacoes import desmarcar_transacao_aplicacao
+
+            eh_resgate = tx.tipo == "CREDIT"
+            rotulo = "RESGATE" if eh_resgate else "APLICACAO"
+            sinal = "+" if eh_resgate else "-"
+            titulo = (
+                f"💰 {rotulo} | {tx.data} | {tx.descricao} | "
+                f"{sinal}R$ {valor_abs:,.2f}"
+            )
+
+            with st.expander(titulo):
+                st.info(
+                    "Movimentacao entre a conta corrente e a aplicacao financeira. "
+                    "NAO impacta teto orcamentario e NAO e tratada como remessa — "
+                    "o dinheiro apenas mudou de lugar."
+                )
+
+                mov = (
+                    session.query(MovimentoAplicacao)
+                    .filter(MovimentoAplicacao.transacao_bancaria_id == tx.id)
+                    .first()
+                )
+                if mov:
+                    st.caption(
+                        f"Movimento registrado em Aplicacao Financeira: "
+                        f"{mov.data.strftime('%d/%m/%Y')} | R$ {mov.valor_brl:,.2f}"
+                        + (f" | {mov.descricao}" if mov.descricao else "")
+                    )
+                else:
+                    st.warning(
+                        "Linha marcada como aplicacao, mas sem movimento registrado "
+                        "em Aplicacao Financeira. Registre o movimento para o saldo "
+                        "aplicado ficar correto."
+                    )
+
+                if st.button(
+                    "Desfazer marcacao de aplicacao",
+                    key=f"btn_desfazer_aplic_{tx.id}",
+                ):
+                    if mov:
+                        session.delete(mov)
+                    desmarcar_transacao_aplicacao(session, tx)
+                    session.commit()
+                    st.info(
+                        "Marcacao desfeita. A transacao voltou para pendentes"
+                        + (" e o movimento da aplicacao foi removido." if mov else ".")
+                    )
                     st.rerun()
             continue
 

@@ -54,7 +54,13 @@ def _gastos_por_mes(session) -> dict:
 
 
 def _entradas_por_mes(session) -> dict:
-    """Retorna dict {(ano, mes): total_entradas} de remessas recebidas."""
+    """Retorna dict {(ano, mes): total_entradas} de remessas recebidas.
+
+    Inclui tambem o rendimento liquido da aplicacao financeira (receita nova
+    do projeto). Aplicacoes e resgates NAO entram: o dinheiro so muda de lugar.
+    """
+    from models import MovimentoAplicacao
+
     remessas = (
         session.query(Remessa)
         .filter(Remessa.recebida == True, Remessa.data_recebimento != None)
@@ -65,6 +71,17 @@ def _entradas_por_mes(session) -> dict:
         if r.valor_brl and r.data_recebimento:
             chave = (r.data_recebimento.year, r.data_recebimento.month)
             entradas[chave] = entradas.get(chave, Decimal("0.00")) + r.valor_brl
+
+    movimentos = (
+        session.query(MovimentoAplicacao)
+        .filter(MovimentoAplicacao.tipo.in_(["RENDIMENTO", "IR_IOF"]))
+        .all()
+    )
+    for m in movimentos:
+        chave = (m.data.year, m.data.month)
+        sinal = Decimal("1") if m.tipo == "RENDIMENTO" else Decimal("-1")
+        entradas[chave] = entradas.get(chave, Decimal("0.00")) + sinal * m.valor_brl
+
     return entradas
 
 

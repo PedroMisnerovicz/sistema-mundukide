@@ -908,6 +908,8 @@ def render():
     st.markdown("<br>", unsafe_allow_html=True)
     _secao_metricas(session, remessas, cambio, total_gasto)
     st.markdown("---")
+    _secao_caixa_real(session)
+    st.markdown("---")
     _secao_termometro(remessas, cambio, total_gasto)
     st.markdown("---")
     _secao_execucao_cc(session, centros, cambio)
@@ -959,6 +961,39 @@ def _secao_metricas(session, remessas, cambio, total_gasto):
         _fmt_brl(saldo),
         delta=("Positivo" if saldo >= 0 else "Negativo"),
     )
+    st.caption(
+        "Saldo em Conta acima = saldo orcamentario (remessas recebidas menos tudo "
+        "que ja foi lancado como despesa). O caixa real do banco esta na secao abaixo."
+    )
+
+
+# ──────── secao 1b: caixa real (conta + aplicacao) ──────────
+
+def _secao_caixa_real(session):
+    """Caixa efetivo: extrato bancario + aplicacao financeira, com conferencia."""
+    from modulos.aplicacoes import consolidado
+
+    c = consolidado(session)
+
+    st.subheader("Caixa Real (Banco + Aplicacao)")
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Conta Corrente", _fmt_brl(c["saldo_conta_corrente"]))
+    col2.metric("Aplicado", _fmt_brl(c["saldo_aplicado"]))
+    col3.metric("Disponivel Total", _fmt_brl(c["disponivel_total"]))
+    col4.metric("Rendimento Liquido", _fmt_brl(c["rendimento_liquido"]))
+
+    div = c["divergencia"]
+    if abs(div) < Decimal("0.01"):
+        st.success(
+            "Caixa conferido: banco + aplicacao batem exatamente com "
+            "remessas + rendimento - despesas pagas."
+        )
+    else:
+        st.warning(
+            f"Divergencia de {_fmt_brl(div)} entre o caixa real e o esperado. "
+            "Veja o detalhamento e as causas provaveis em **Aplicacao Financeira**."
+        )
 
 
 # ──────── secao 2: termometro de liberacao (80%) ────────────
