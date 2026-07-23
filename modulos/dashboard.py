@@ -970,12 +970,12 @@ def _secao_metricas(session, remessas, cambio, total_gasto):
 # ──────── secao 1b: caixa real (conta + aplicacao) ──────────
 
 def _secao_caixa_real(session):
-    """Caixa efetivo: extrato bancario + aplicacao financeira, com conferencia."""
-    from modulos.aplicacoes import analise_divergencia, consolidado
+    """Caixa do projeto pelos lancamentos, com a validacao contra o extrato."""
+    from modulos.aplicacoes import consolidado, validacao_extrato
 
     c = consolidado(session)
 
-    st.subheader("Caixa Real (Banco + Aplicacao)")
+    st.subheader("Caixa do Projeto (Conta + Aplicacao)")
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Conta Corrente", _fmt_brl(c["saldo_conta_corrente"]))
@@ -983,29 +983,34 @@ def _secao_caixa_real(session):
     col3.metric("Disponivel Total", _fmt_brl(c["disponivel_total"]))
     col4.metric("Rendimento Liquido", _fmt_brl(c["rendimento_liquido"]))
 
-    div = c["divergencia"]
-    if abs(div) < Decimal("0.01"):
-        st.success(
-            "Caixa conferido: banco + aplicacao batem exatamente com "
-            "remessas + rendimento - despesas pagas."
+    st.caption(
+        "Calculado a partir dos lancamentos — atualiza na hora, sem depender da "
+        "importacao do OFX."
+    )
+
+    if c["despesas_a_pagar"] > 0:
+        st.caption(
+            f"Ha {_fmt_brl(c['despesas_a_pagar'])} em despesas com pagamento futuro. "
+            f"Descontando esses compromissos, sobram "
+            f"{_fmt_brl(c['disponivel_apos_compromissos'])}."
         )
+
+    v = validacao_extrato(session)
+    if not v["tem_extrato"]:
         return
 
-    analise = analise_divergencia(session)
-
-    if analise["tem_explicacao"]:
-        st.info(
-            f"{_fmt_brl(abs(analise['efeito_pendentes']))} da diferenca sao esperados: "
-            f"{len(analise['pendentes'])} movimento(s) de aplicacao aguardando a linha "
-            "do extrato ser importada. Nao e erro de lancamento."
-        )
-
-    if analise["exige_acao"]:
-        rotulo = "Sobram" if analise["tem_explicacao"] else "Divergencia de"
+    if v["exige_acao"]:
         st.warning(
-            f"{rotulo} {_fmt_brl(analise['residual'])} sem explicacao entre o caixa "
-            "real e o esperado. Veja as causas provaveis em **Aplicacao Financeira**."
+            f"Validacao com o extrato: sobram {_fmt_brl(v['residual'])} sem explicacao. "
+            "Veja as causas provaveis em **Aplicacao Financeira**."
         )
+    elif abs(v["diferenca"]) >= Decimal("0.01"):
+        st.info(
+            f"Validacao com o extrato: diferenca de {_fmt_brl(v['diferenca'])}, toda "
+            "explicada por lancamentos que o OFX importado ainda nao cobre."
+        )
+    else:
+        st.success("Validacao com o extrato: lancamentos e banco batem exatamente.")
 
 
 # ──────── secao 2: termometro de liberacao (80%) ────────────

@@ -93,14 +93,32 @@ Atue como um Engenheiro de Software Senior especialista em Python, Pandas, SQLAl
   manualmente a partir do extrato da aplicacao.
 - **Rendimento e receita nova do projeto, mas NAO altera os tetos em EUR**, que
   seguem inegociaveis. Fica reportado em linha separada (decisao dos diretores).
+
+### 6.1 Saldo vem dos LANCAMENTOS, nao do extrato (CRITICO)
+O usuario lanca durante o mes e importa o OFX **uma vez por mes**, apenas para
+validar. Um saldo derivado do extrato ficaria parado no tempo entre importacoes.
+Por isso:
+
+- `conta_corrente = remessas recebidas - despesas pagas - aplicacoes + resgates`
 - `saldo_aplicado = aplicacoes + rendimentos - resgates - IR/IOF`
-- `disponivel_total = saldo em conta corrente (extrato) + saldo aplicado`
-- **Duas conferencias independentes** (ambas em `modulos/aplicacoes.py`):
-  1. *Caixa*: `remessas + rendimento liquido - despesas pagas no banco` deve igualar
-     `conta corrente + aplicado`. Valida tudo que passa pela conta corrente.
-  2. *Saldo aplicado*: comparacao com o saldo informado no extrato do fundo.
-     Necessaria porque rendimento e IR/IOF entram nos **dois lados** da conferencia 1
-     e por isso jamais gerariam divergencia la.
+- `disponivel_total = conta_corrente + saldo_aplicado`
+- O rendimento **nao** entra na conta corrente: nasce e fica dentro do fundo.
+  Ele se cancela algebricamente na formula da conta corrente — so chega na conta
+  via resgate.
+- Uma despesa conta como paga se estiver vinculada ao extrato **ou** se
+  `data_pagamento` (ou `data`) ja chegou. Despesas futuras viram "a pagar" e nao
+  reduzem o saldo — aparecem como compromissos.
+- `saldo_extrato()` (soma das TransacaoBancaria) NAO e o saldo do projeto; serve
+  so para conferir.
+
+**Duas conferencias independentes** (ambas em `modulos/aplicacoes.py`):
+  1. `validacao_extrato()`: compara saldo dos lancamentos com o saldo do extrato.
+     No meio do mes os dois divergem por natureza — a diferenca esperada e
+     `remessas sem credito importado - despesas pagas sem linha - aplicacoes sem
+     linha + resgates sem linha`. So o **residual** exige acao.
+  2. `_conferencia_fundo()`: comparacao com o saldo informado no extrato do fundo.
+     Necessaria porque rendimento e IR/IOF nunca passam pela conta corrente e
+     portanto jamais apareceriam na conferencia 1.
 
 ### 7. Conciliacao Bancaria
 - O projeto usa conta bancaria exclusiva.

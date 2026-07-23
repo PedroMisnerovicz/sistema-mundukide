@@ -91,8 +91,12 @@ def rendimento_liquido(session) -> Decimal:
     return _q2(_soma_por_tipo(session, "RENDIMENTO") - _soma_por_tipo(session, "IR_IOF"))
 
 
-def saldo_conta_corrente(session) -> Decimal:
-    """Saldo real da conta corrente = soma de todas as linhas do extrato OFX."""
+def saldo_extrato(session) -> Decimal:
+    """Saldo da conta corrente segundo o extrato OFX ja importado.
+
+    NAO e a fonte do saldo do projeto — serve para conferir os lancamentos.
+    Fica defasado entre uma importacao e outra.
+    """
     resultado = (
         session.query(sqlfunc.coalesce(sqlfunc.sum(TransacaoBancaria.valor), 0))
         .scalar()
@@ -100,33 +104,78 @@ def saldo_conta_corrente(session) -> Decimal:
     return _q2(resultado)
 
 
-def consolidado(session) -> dict:
-    """Fecha o caixa do projeto e devolve a checagem de divergencia.
+def _despesa_esta_paga(item: ItemDespesa, hoje: date) -> bool:
+    """True quando o dinheiro ja saiu (ou deveria ter saido) da conta.
 
-    Identidade esperada:
-        conta corrente + aplicado  ==  remessas recebidas + rendimento liquido
-                                       - gastos que ja passaram no banco
+    Se esta vinculada ao extrato, o banco ja debitou — nao ha duvida.
+    Caso contrario vale a data de pagamento informada no lancamento.
     """
-    cc = saldo_conta_corrente(session)
-    aplicado = saldo_aplicado(session)
-    disponivel = _q2(cc + aplicado)
+    if item.transacao_bancaria_id is not None:
+        return True
+    data_efetiva = item.data_pagamento or item.data
+    return data_efetiva is not None and data_efetiva <= hoje
+
+
+def despesas_lancadas(session, hoje: date = None) -> dict:
+    """Separa as despesas lancadas entre ja pagas e ainda a pagar.
+
+    Conta TODOS os lancamentos, conciliados ou nao: o saldo do projeto vem do
+    que foi lancado, nao do que o extrato ja mostrou.
+    """
+    hoje = hoje or date.today()
+    itens = session.query(ItemDespesa).all()
+
+    pagas = Decimal("0.00")
+    a_pagar = Decimal("0.00")
+    pagas_sem_extrato = Decimal("0.00")
+
+    for item in itens:
+        valor = Decimal(str(item.valor_brl))
+        if _despesa_esta_paga(item, hoje):
+            pagas += valor
+            if item.transacao_bancaria_id is None:
+                pagas_sem_extrato += valor
+        else:
+            a_pagar += valor
+
+    return {
+        "pagas": _q2(pagas),
+        "a_pagar": _q2(a_pagar),
+        "pagas_sem_extrato": _q2(pagas_sem_extrato),
+        "total": _q2(pagas + a_pagar),
+    }
+
+
+def consolidado(session, hoje: date = None) -> dict:
+    """Saldo do projeto a partir dos LANCAMENTOS (nao do extrato).
+
+    O extrato OFX chega uma vez por mes e serve para validar — se o saldo
+    dependesse dele, ficaria parado no tempo entre uma importacao e outra.
+
+        conta corrente = remessas recebidas - despesas pagas
+                         - aplicacoes + resgates
+        saldo aplicado = aplicacoes + rendimentos - resgates - IR/IOF
+        disponivel     = conta corrente + saldo aplicado
+
+    O rendimento nao aparece na conta corrente porque nasce e fica dentro do
+    fundo — so entra na conta se for resgatado.
+    """
+    hoje = hoje or date.today()
 
     remessas_recebidas = Decimal(str(
         session.query(sqlfunc.coalesce(sqlfunc.sum(Remessa.valor_brl), 0))
         .filter(Remessa.recebida == True)
         .scalar()
     ))
+
+    desp = despesas_lancadas(session, hoje)
+    aplicacoes = _soma_por_tipo(session, "APLICACAO")
+    resgates = _soma_por_tipo(session, "RESGATE")
+
+    cc = _q2(remessas_recebidas - desp["pagas"] - aplicacoes + resgates)
+    aplicado = saldo_aplicado(session)
+    disponivel = _q2(cc + aplicado)
     rend = rendimento_liquido(session)
-
-    # Apenas despesas efetivamente pagas pelo banco entram na identidade.
-    # Lancamentos manuais ainda nao conciliados sao "a pagar" — nao sairam da conta.
-    gastos_no_banco = Decimal(str(
-        session.query(sqlfunc.coalesce(sqlfunc.sum(ItemDespesa.valor_brl), 0))
-        .filter(ItemDespesa.transacao_bancaria_id != None)
-        .scalar()
-    ))
-
-    esperado = _q2(remessas_recebidas + rend - gastos_no_banco)
 
     return {
         "saldo_conta_corrente": cc,
@@ -134,52 +183,74 @@ def consolidado(session) -> dict:
         "disponivel_total": disponivel,
         "remessas_recebidas": remessas_recebidas,
         "rendimento_liquido": rend,
-        "gastos_no_banco": gastos_no_banco,
-        "esperado": esperado,
-        "divergencia": _q2(disponivel - esperado),
+        "despesas_pagas": desp["pagas"],
+        "despesas_a_pagar": desp["a_pagar"],
+        "despesas_pagas_sem_extrato": desp["pagas_sem_extrato"],
+        "aplicacoes": _q2(aplicacoes),
+        "resgates": _q2(resgates),
+        "disponivel_apos_compromissos": _q2(disponivel - desp["a_pagar"]),
     }
 
 
-def analise_divergencia(session) -> dict:
-    """Separa a divergencia de caixa entre a parte esperada e a que exige acao.
+def validacao_extrato(session, hoje: date = None) -> dict:
+    """Confere os lancamentos contra o extrato OFX ja importado.
 
-    Parte esperada: movimentos de aplicacao/resgate ja registrados cuja linha
-    ainda nao existe no extrato importado (tipico de movimentacao feita hoje,
-    cujo OFX so sai depois). Enquanto o vinculo nao existe, o mesmo dinheiro e
-    contado na conta corrente e no fundo — a divergencia e so um atraso de
-    informacao, nao um erro de lancamento.
+    O extrato so conhece o que ja foi importado. Enquanto voce lanca durante o
+    mes e importa o OFX uma vez, e NORMAL que os dois numeros sejam diferentes:
+    a diferenca deve ser exatamente o que ainda nao passou pelo extrato.
+
+        diferenca esperada = remessas sem credito importado
+                             - despesas pagas sem linha no extrato
+                             - aplicacoes sem linha + resgates sem linha
+
+    O que sobra disso (residual) e o que realmente merece atencao: linha do
+    extrato importada e nunca classificada, ou valor lancado diferente do que
+    o banco debitou.
     """
-    div = consolidado(session)["divergencia"]
-    pendentes = movimentos_sem_extrato(session)
+    hoje = hoje or date.today()
+    c = consolidado(session, hoje)
+    extrato = saldo_extrato(session)
 
-    # So explica a divergencia o movimento que ainda NAO tem linha no extrato.
-    # Se a linha ja foi importada (mesmo sem vinculo), a conta corrente ja
-    # descontou o valor e o movimento nao e mais causa de divergencia — e apenas
-    # uma pendencia de vinculo. Consumo greedy para nao usar a mesma linha duas vezes.
-    usados = set()
-    sem_extrato = []
-    for m in pendentes:
-        candidatas = [
-            tx for tx in transacoes_candidatas(session, m.tipo, Decimal(str(m.valor_brl)))
-            if tx.id not in usados and abs(tx.valor) == m.valor_brl
-        ]
-        if candidatas:
-            usados.add(candidatas[0].id)
-        else:
-            sem_extrato.append(m)
+    diferenca = _q2(c["saldo_conta_corrente"] - extrato)
 
-    efeito = _q2(sum(
-        (m.efeito_no_saldo_aplicado for m in sem_extrato), Decimal("0.00")
+    # Remessas recebidas que ainda nao foram casadas com um credito do extrato
+    remessas_sem_extrato = Decimal(str(
+        session.query(sqlfunc.coalesce(sqlfunc.sum(Remessa.valor_brl), 0))
+        .filter(Remessa.recebida == True, Remessa.transacao_bancaria_id == None)
+        .scalar()
     ))
-    residual = _q2(div - efeito)
+
+    # Movimentos de aplicacao/resgate ainda sem linha no extrato
+    mov_sem_extrato = movimentos_sem_extrato(session)
+    aplic_sem_extrato = _q2(sum(
+        (Decimal(str(m.valor_brl)) for m in mov_sem_extrato if m.tipo == "APLICACAO"),
+        Decimal("0.00"),
+    ))
+    resg_sem_extrato = _q2(sum(
+        (Decimal(str(m.valor_brl)) for m in mov_sem_extrato if m.tipo == "RESGATE"),
+        Decimal("0.00"),
+    ))
+
+    esperada = _q2(
+        remessas_sem_extrato
+        - c["despesas_pagas_sem_extrato"]
+        - aplic_sem_extrato
+        + resg_sem_extrato
+    )
+    residual = _q2(diferenca - esperada)
 
     return {
-        "divergencia": div,
-        "pendentes": sem_extrato,
-        "aguardando_vinculo": pendentes,
-        "efeito_pendentes": efeito,
+        "saldo_extrato": extrato,
+        "saldo_lancamentos": c["saldo_conta_corrente"],
+        "diferenca": diferenca,
+        "esperada": esperada,
         "residual": residual,
-        "tem_explicacao": bool(sem_extrato) and abs(efeito) >= Decimal("0.01"),
+        "remessas_sem_extrato": remessas_sem_extrato,
+        "despesas_sem_extrato": c["despesas_pagas_sem_extrato"],
+        "aplicacoes_sem_extrato": aplic_sem_extrato,
+        "resgates_sem_extrato": resg_sem_extrato,
+        "movimentos_sem_extrato": mov_sem_extrato,
+        "tem_extrato": session.query(TransacaoBancaria).first() is not None,
         "exige_acao": abs(residual) >= Decimal("0.01"),
     }
 
@@ -286,93 +357,109 @@ def _painel_consolidado(session):
     col4.metric("Rendimento Liquido", _fmt(c["rendimento_liquido"]))
 
     st.caption(
-        "Disponivel Total = conta corrente + aplicado. "
+        "Estes saldos vem dos seus **lancamentos** e atualizam na hora, sem depender "
+        "da importacao do OFX. Disponivel Total = conta corrente + aplicado. "
         "Rendimento Liquido = rendimentos do fundo menos IR/IOF (receita do projeto, "
         "que nao altera os tetos em EUR)."
     )
 
-    analise = analise_divergencia(session)
-
-    # Aviso direto no painel: a conta corrente ainda nao refletiu o movimento
-    if analise["tem_explicacao"]:
+    if c["despesas_a_pagar"] > 0:
         st.caption(
-            f"⏳ {len(analise['pendentes'])} movimento(s) ainda sem linha no extrato. "
-            "Ate importar o OFX do periodo, o valor da **Conta Corrente** acima nao "
-            "desconta esse dinheiro — por isso o Disponivel Total aparece maior que o real."
-        )
-    elif analise["aguardando_vinculo"]:
-        st.caption(
-            f"🔗 {len(analise['aguardando_vinculo'])} movimento(s) com a linha ja no "
-            "extrato, faltando apenas vincular. Os saldos acima ja estao corretos — "
-            "vincule em *Movimentos Registrados* para fechar a conciliacao."
+            f"Ha {_fmt(c['despesas_a_pagar'])} em despesas lancadas com pagamento "
+            f"futuro. Descontando esses compromissos, sobram "
+            f"{_fmt(c['disponivel_apos_compromissos'])}."
         )
 
-    # Checagem de integridade
-    div = c["divergencia"]
-    with st.expander("Conferencia de caixa (checagem automatica)", expanded=abs(div) >= Decimal("0.01")):
+    with st.expander("Como este saldo e calculado", expanded=False):
         st.markdown(
             f"""
 | Conta | Valor |
 |---|---|
 | Remessas recebidas | {_fmt(c['remessas_recebidas'])} |
-| (+) Rendimento liquido da aplicacao | {_fmt(c['rendimento_liquido'])} |
-| (−) Despesas ja pagas pelo banco | {_fmt(c['gastos_no_banco'])} |
-| **= Caixa esperado** | **{_fmt(c['esperado'])}** |
-| Caixa real (conta corrente + aplicado) | {_fmt(c['disponivel_total'])} |
-| **Divergencia** | **{_fmt(div)}** |
+| (−) Despesas lancadas e ja pagas | {_fmt(c['despesas_pagas'])} |
+| (−) Aplicado no fundo | {_fmt(c['aplicacoes'])} |
+| (+) Resgatado do fundo | {_fmt(c['resgates'])} |
+| **= Saldo em conta corrente** | **{_fmt(c['saldo_conta_corrente'])}** |
+| (+) Saldo aplicado (com rendimentos) | {_fmt(c['saldo_aplicado'])} |
+| **= Disponivel Total** | **{_fmt(c['disponivel_total'])}** |
 """
         )
-        if abs(div) < Decimal("0.01"):
-            st.success(
-                "Caixa conferido: o dinheiro que existe bate exatamente com o que "
-                "entrou menos o que saiu."
-            )
-        else:
-            pendentes = analise["pendentes"]
-            efeito = analise["efeito_pendentes"]
-            residual = analise["residual"]
-
-            if analise["tem_explicacao"]:
-                detalhe = "\n".join(
-                    f"- {m.data.strftime('%d/%m/%Y')} — {ROTULOS_CURTOS[m.tipo]} de "
-                    f"{_fmt(m.valor_brl)}"
-                    for m in pendentes
-                )
-                st.info(
-                    f"**{_fmt(abs(efeito))} da divergencia sao esperados** e nao indicam "
-                    f"erro nos seus lancamentos:\n\n{detalhe}\n\n"
-                    "Esse(s) movimento(s) ja foram registrados aqui, mas a linha "
-                    "correspondente ainda nao existe no extrato importado — normal "
-                    "quando a movimentacao foi feita hoje, porque o OFX do dia so fica "
-                    "disponivel depois. Enquanto isso, o mesmo dinheiro e contado na "
-                    "conta corrente e no fundo ao mesmo tempo.\n\n"
-                    "**O que fazer:** quando o OFX do periodo estiver disponivel, "
-                    "importe em *Importacao OFX* e vincule em *Movimentos Registrados*. "
-                    "A divergencia zera sozinha."
-                )
-
-            if abs(residual) >= Decimal("0.01"):
-                titulo = (
-                    f"Sobram {_fmt(residual)} sem explicacao."
-                    if analise["tem_explicacao"]
-                    else f"Divergencia de {_fmt(div)}."
-                )
-                st.warning(
-                    f"{titulo} Causas comuns, em ordem de probabilidade:\n\n"
-                    "1. Alguma linha do extrato ainda nao foi classificada na Conciliacao.\n"
-                    "2. Uma aplicacao ou resgate do extrato ainda nao foi registrado aqui.\n"
-                    "3. Um credito recebido ainda nao foi vinculado a uma remessa.\n"
-                    "4. A conta tinha saldo antes do primeiro OFX importado."
-                )
-
         st.caption(
-            "Esta conferencia valida tudo que passa pela conta corrente. Ela **nao** "
-            "consegue validar rendimento e IR/IOF, porque esses valores nascem dentro "
-            "do fundo e nao tem linha no extrato bancario — use a conferencia do saldo "
-            "aplicado abaixo para isso."
+            "O rendimento nao entra na conta corrente porque nasce e permanece dentro "
+            "do fundo — so chega na conta se voce resgatar."
         )
 
-    _conferencia_fundo(session, c["saldo_aplicado"])
+    _validacao_extrato(session)
+
+
+def _validacao_extrato(session):
+    """Confronta os lancamentos com o extrato OFX ja importado."""
+    v = validacao_extrato(session)
+
+    if not v["tem_extrato"]:
+        return
+
+    titulo = "Validacao com o extrato bancario (OFX)"
+    with st.expander(titulo, expanded=v["exige_acao"]):
+        st.markdown(
+            f"""
+| Conta | Valor |
+|---|---|
+| Saldo pelos seus lancamentos | {_fmt(v['saldo_lancamentos'])} |
+| Saldo pelo extrato importado | {_fmt(v['saldo_extrato'])} |
+| **Diferenca** | **{_fmt(v['diferenca'])}** |
+| Diferenca explicada (ainda nao passou pelo extrato) | {_fmt(v['esperada'])} |
+| **Sobra sem explicacao** | **{_fmt(v['residual'])}** |
+"""
+        )
+
+        detalhes = []
+        if v["remessas_sem_extrato"] > 0:
+            detalhes.append(
+                f"- Remessas recebidas sem credito importado: {_fmt(v['remessas_sem_extrato'])}"
+            )
+        if v["despesas_sem_extrato"] > 0:
+            detalhes.append(
+                f"- Despesas lancadas que o extrato ainda nao mostrou: "
+                f"{_fmt(v['despesas_sem_extrato'])}"
+            )
+        if v["aplicacoes_sem_extrato"] > 0:
+            detalhes.append(
+                f"- Aplicacoes sem linha no extrato: {_fmt(v['aplicacoes_sem_extrato'])}"
+            )
+        if v["resgates_sem_extrato"] > 0:
+            detalhes.append(
+                f"- Resgates sem linha no extrato: {_fmt(v['resgates_sem_extrato'])}"
+            )
+
+        if detalhes:
+            st.info(
+                "A diferenca abaixo e **esperada** — sao lancamentos seus que o extrato "
+                "importado ainda nao cobre. Some quando voce importar o OFX do periodo:\n\n"
+                + "\n".join(detalhes)
+            )
+
+        if not v["exige_acao"]:
+            st.success(
+                "Seus lancamentos batem com o extrato. Toda diferenca esta explicada "
+                "por movimentacao que o OFX importado ainda nao alcanca."
+            )
+        else:
+            st.warning(
+                f"Sobram {_fmt(v['residual'])} sem explicacao. Causas comuns:\n\n"
+                "1. Alguma linha do extrato foi importada e nunca classificada na Conciliacao.\n"
+                "2. Um valor lancado esta diferente do que o banco debitou.\n"
+                "3. Uma despesa aconteceu no banco e nunca foi lancada no sistema.\n"
+                "4. A conta tinha saldo antes do primeiro OFX importado."
+            )
+
+        st.caption(
+            "Esta validacao cobre tudo que passa pela conta corrente. Ela **nao** valida "
+            "rendimento e IR/IOF, que nascem dentro do fundo e nao tem linha no extrato "
+            "bancario — para isso use a conferencia do saldo aplicado abaixo."
+        )
+
+    _conferencia_fundo(session, consolidado(session)["saldo_aplicado"])
 
 
 def _conferencia_fundo(session, saldo_calculado: Decimal):
@@ -593,11 +680,12 @@ def _bloco_vincular_pendentes(session, movimentos: list):
 
     st.markdown("---")
     st.markdown("**Movimentos aguardando a linha do extrato**")
-    st.warning(
+    st.info(
         f"{len(pendentes)} movimento(s) registrado(s) sem vinculo com o extrato da "
-        "conta corrente. Enquanto o vinculo nao existir, a conferencia de caixa vai "
-        "acusar divergencia. Se o OFX do periodo ja foi importado, vincule aqui — "
-        "assim voce evita lancar o mesmo movimento duas vezes."
+        "conta corrente. **Os saldos ja estao corretos** — o vinculo serve para a "
+        "validacao contra o OFX. Depois de importar o extrato do periodo, vincule "
+        "aqui em vez de classificar a linha pela Conciliacao, senao o valor conta "
+        "em dobro."
     )
 
     opcoes_mov = {
@@ -674,27 +762,44 @@ uma regra de rateio entre os centros de custo — avise que o sistema e ajustado
 
 ---
 
+### De onde vem o saldo
+
+O saldo vem dos seus **lancamentos**, nao do extrato:
+
+```
+conta corrente = remessas recebidas - despesas pagas
+                 - aplicado no fundo + resgatado do fundo
+saldo aplicado = aplicacoes + rendimentos - resgates - IR/IOF
+disponivel     = conta corrente + saldo aplicado
+```
+
+Ou seja: assim que voce lanca uma despesa ou registra uma aplicacao, o saldo
+muda na hora. Voce nao precisa importar o OFX para o numero ficar correto —
+o OFX serve para **conferir**, nao para calcular.
+
+Uma despesa conta como paga quando esta vinculada ao extrato ou quando a data
+de pagamento informada ja chegou. Despesas com pagamento futuro aparecem
+separadas, como compromissos a pagar.
+
+---
+
 ### As duas conferencias (e por que sao duas)
 
-**Conferencia de caixa** — roda sozinha toda vez que voce abre a tela:
-
-```
-remessas recebidas + rendimento liquido - despesas pagas pelo banco
-                    deve ser igual a
-        saldo em conta corrente + saldo aplicado
-```
-
-Ela valida tudo que passa pela conta corrente: linha do extrato nao
-classificada, resgate nao registrado, credito sem remessa vinculada.
+**Validacao com o extrato bancario** — aparece quando ha OFX importado.
+Compara o saldo dos seus lancamentos com o saldo do extrato. Os dois quase
+nunca serao iguais no meio do mes, e isso e normal: a diferenca deve ser
+exatamente o que voce lancou e o extrato ainda nao alcancou. O sistema calcula
+essa parte esperada e mostra separado o que **sobra** — que e o que realmente
+merece atencao: linha importada e nunca classificada, valor lancado diferente
+do que o banco debitou, ou despesa que passou no banco e nunca foi lancada.
 
 **Conferencia do saldo aplicado** — voce digita o saldo do extrato do fundo.
 
-Essa segunda conferencia existe porque rendimento e IR/IOF nascem dentro do
-fundo e nao tem linha nenhuma no extrato bancario. Eles entram nos dois lados
-da conta de caixa ao mesmo tempo, entao a primeira conferencia nunca acusaria
-um rendimento esquecido. A unica fonte externa capaz de provar que o
-rendimento foi lancado certo e o proprio extrato da aplicacao — por isso a
-comparacao direta com o saldo que o banco informa.
+Essa segunda existe porque rendimento e IR/IOF nascem dentro do fundo e nao
+tem linha nenhuma no extrato bancario. Eles nunca apareceriam na primeira
+validacao, entao um rendimento esquecido passaria despercebido. A unica fonte
+externa capaz de provar que o rendimento foi lancado certo e o proprio extrato
+da aplicacao.
 
 Com as duas rodando, todo real do projeto tem conferencia contra um documento
 do banco.
