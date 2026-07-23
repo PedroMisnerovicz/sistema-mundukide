@@ -140,6 +140,50 @@ def consolidado(session) -> dict:
     }
 
 
+def analise_divergencia(session) -> dict:
+    """Separa a divergencia de caixa entre a parte esperada e a que exige acao.
+
+    Parte esperada: movimentos de aplicacao/resgate ja registrados cuja linha
+    ainda nao existe no extrato importado (tipico de movimentacao feita hoje,
+    cujo OFX so sai depois). Enquanto o vinculo nao existe, o mesmo dinheiro e
+    contado na conta corrente e no fundo — a divergencia e so um atraso de
+    informacao, nao um erro de lancamento.
+    """
+    div = consolidado(session)["divergencia"]
+    pendentes = movimentos_sem_extrato(session)
+
+    # So explica a divergencia o movimento que ainda NAO tem linha no extrato.
+    # Se a linha ja foi importada (mesmo sem vinculo), a conta corrente ja
+    # descontou o valor e o movimento nao e mais causa de divergencia — e apenas
+    # uma pendencia de vinculo. Consumo greedy para nao usar a mesma linha duas vezes.
+    usados = set()
+    sem_extrato = []
+    for m in pendentes:
+        candidatas = [
+            tx for tx in transacoes_candidatas(session, m.tipo, Decimal(str(m.valor_brl)))
+            if tx.id not in usados and abs(tx.valor) == m.valor_brl
+        ]
+        if candidatas:
+            usados.add(candidatas[0].id)
+        else:
+            sem_extrato.append(m)
+
+    efeito = _q2(sum(
+        (m.efeito_no_saldo_aplicado for m in sem_extrato), Decimal("0.00")
+    ))
+    residual = _q2(div - efeito)
+
+    return {
+        "divergencia": div,
+        "pendentes": sem_extrato,
+        "aguardando_vinculo": pendentes,
+        "efeito_pendentes": efeito,
+        "residual": residual,
+        "tem_explicacao": bool(sem_extrato) and abs(efeito) >= Decimal("0.01"),
+        "exige_acao": abs(residual) >= Decimal("0.01"),
+    }
+
+
 # ──────────────── Vinculo com o extrato ────────────────────
 
 def marcar_transacao_como_aplicacao(session, tx: TransacaoBancaria):
@@ -247,6 +291,22 @@ def _painel_consolidado(session):
         "que nao altera os tetos em EUR)."
     )
 
+    analise = analise_divergencia(session)
+
+    # Aviso direto no painel: a conta corrente ainda nao refletiu o movimento
+    if analise["tem_explicacao"]:
+        st.caption(
+            f"⏳ {len(analise['pendentes'])} movimento(s) ainda sem linha no extrato. "
+            "Ate importar o OFX do periodo, o valor da **Conta Corrente** acima nao "
+            "desconta esse dinheiro — por isso o Disponivel Total aparece maior que o real."
+        )
+    elif analise["aguardando_vinculo"]:
+        st.caption(
+            f"🔗 {len(analise['aguardando_vinculo'])} movimento(s) com a linha ja no "
+            "extrato, faltando apenas vincular. Os saldos acima ja estao corretos — "
+            "vincule em *Movimentos Registrados* para fechar a conciliacao."
+        )
+
     # Checagem de integridade
     div = c["divergencia"]
     with st.expander("Conferencia de caixa (checagem automatica)", expanded=abs(div) >= Decimal("0.01")):
@@ -268,13 +328,42 @@ def _painel_consolidado(session):
                 "entrou menos o que saiu."
             )
         else:
-            st.warning(
-                f"Divergencia de {_fmt(div)}. Causas comuns, em ordem de probabilidade:\n\n"
-                "1. Alguma linha do extrato ainda nao foi classificada na Conciliacao.\n"
-                "2. Uma aplicacao ou resgate do extrato ainda nao foi registrado aqui.\n"
-                "3. Um credito recebido ainda nao foi vinculado a uma remessa.\n"
-                "4. A conta tinha saldo antes do primeiro OFX importado."
-            )
+            pendentes = analise["pendentes"]
+            efeito = analise["efeito_pendentes"]
+            residual = analise["residual"]
+
+            if analise["tem_explicacao"]:
+                detalhe = "\n".join(
+                    f"- {m.data.strftime('%d/%m/%Y')} — {ROTULOS_CURTOS[m.tipo]} de "
+                    f"{_fmt(m.valor_brl)}"
+                    for m in pendentes
+                )
+                st.info(
+                    f"**{_fmt(abs(efeito))} da divergencia sao esperados** e nao indicam "
+                    f"erro nos seus lancamentos:\n\n{detalhe}\n\n"
+                    "Esse(s) movimento(s) ja foram registrados aqui, mas a linha "
+                    "correspondente ainda nao existe no extrato importado — normal "
+                    "quando a movimentacao foi feita hoje, porque o OFX do dia so fica "
+                    "disponivel depois. Enquanto isso, o mesmo dinheiro e contado na "
+                    "conta corrente e no fundo ao mesmo tempo.\n\n"
+                    "**O que fazer:** quando o OFX do periodo estiver disponivel, "
+                    "importe em *Importacao OFX* e vincule em *Movimentos Registrados*. "
+                    "A divergencia zera sozinha."
+                )
+
+            if abs(residual) >= Decimal("0.01"):
+                titulo = (
+                    f"Sobram {_fmt(residual)} sem explicacao."
+                    if analise["tem_explicacao"]
+                    else f"Divergencia de {_fmt(div)}."
+                )
+                st.warning(
+                    f"{titulo} Causas comuns, em ordem de probabilidade:\n\n"
+                    "1. Alguma linha do extrato ainda nao foi classificada na Conciliacao.\n"
+                    "2. Uma aplicacao ou resgate do extrato ainda nao foi registrado aqui.\n"
+                    "3. Um credito recebido ainda nao foi vinculado a uma remessa.\n"
+                    "4. A conta tinha saldo antes do primeiro OFX importado."
+                )
 
         st.caption(
             "Esta conferencia valida tudo que passa pela conta corrente. Ela **nao** "

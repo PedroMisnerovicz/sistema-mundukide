@@ -971,7 +971,7 @@ def _secao_metricas(session, remessas, cambio, total_gasto):
 
 def _secao_caixa_real(session):
     """Caixa efetivo: extrato bancario + aplicacao financeira, com conferencia."""
-    from modulos.aplicacoes import consolidado
+    from modulos.aplicacoes import analise_divergencia, consolidado
 
     c = consolidado(session)
 
@@ -989,10 +989,22 @@ def _secao_caixa_real(session):
             "Caixa conferido: banco + aplicacao batem exatamente com "
             "remessas + rendimento - despesas pagas."
         )
-    else:
+        return
+
+    analise = analise_divergencia(session)
+
+    if analise["tem_explicacao"]:
+        st.info(
+            f"{_fmt_brl(abs(analise['efeito_pendentes']))} da diferenca sao esperados: "
+            f"{len(analise['pendentes'])} movimento(s) de aplicacao aguardando a linha "
+            "do extrato ser importada. Nao e erro de lancamento."
+        )
+
+    if analise["exige_acao"]:
+        rotulo = "Sobram" if analise["tem_explicacao"] else "Divergencia de"
         st.warning(
-            f"Divergencia de {_fmt_brl(div)} entre o caixa real e o esperado. "
-            "Veja o detalhamento e as causas provaveis em **Aplicacao Financeira**."
+            f"{rotulo} {_fmt_brl(analise['residual'])} sem explicacao entre o caixa "
+            "real e o esperado. Veja as causas provaveis em **Aplicacao Financeira**."
         )
 
 
