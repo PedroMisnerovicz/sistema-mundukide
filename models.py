@@ -393,7 +393,7 @@ class Tecnico(Base):
     custo_maximo = Column(
         Numeric(14, 2),
         nullable=True,
-        comment="Custo total maximo mensal (salario + encargos + provisoes)",
+        comment="Custo total maximo mensal (salario + encargos mensais, sem provisao de ferias/13o)",
     )
     salario_bruto = Column(
         Numeric(14, 2),
@@ -407,9 +407,52 @@ class Tecnico(Base):
     lancamentos_recorrentes = relationship(
         "LancamentoRecorrente", back_populates="tecnico", lazy="select",
     )
+    ferias = relationship(
+        "FeriasTecnico",
+        back_populates="tecnico",
+        lazy="select",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self):
         return f"<Tecnico {self.nome} – R${self.salario_bruto}>"
+
+
+# ──────────────────────── Férias (Folha) ───────────────────
+
+class FeriasTecnico(Base):
+    """
+    Registro de férias efetivamente gozadas por um técnico.
+
+    Os encargos de férias NÃO são provisionados mês a mês — são calculados
+    apenas quando as férias de fato acontecem, a partir deste registro
+    (decisão dos diretores do projeto).
+    """
+    __tablename__ = "ferias_tecnicos"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tecnico_id = Column(
+        Integer,
+        ForeignKey("tecnicos.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    data_inicio = Column(Date, nullable=False)
+    dias = Column(
+        Integer,
+        nullable=False,
+        comment="Dias de férias gozados (1 a 30)",
+    )
+    salario_base = Column(
+        Numeric(14, 2),
+        nullable=False,
+        comment="Salário bruto usado como base do cálculo no momento do registro",
+    )
+    observacao = Column(String(255), default="")
+
+    tecnico = relationship("Tecnico", back_populates="ferias", lazy="joined")
+
+    def __repr__(self):
+        return f"<FeriasTecnico tec={self.tecnico_id} {self.data_inicio} {self.dias}d>"
 
 
 # ─────────────── Lançamento Recorrente ─────────────────────

@@ -41,7 +41,7 @@ Atue como um Engenheiro de Software Senior especialista em Python, Pandas, SQLAl
     lancamentos.py         # Lancamentos manuais de despesas
     importacao_ofx.py      # Upload e parse de extratos OFX
     conciliacao.py         # Conciliacao bancaria + splits
-    folha_pagamento.py     # Calculo de folha com encargos BR
+    folha_pagamento.py     # Calculo de folha com encargos BR (sem provisao de ferias/13o)
     fluxo_caixa.py         # Projecao de fluxo de caixa
     dashboard.py           # Dashboard gerencial + exportacao PDF
     carimbo_pdf.py         # Carimbo AVCD em documentos PDF
@@ -71,7 +71,18 @@ Atue como um Engenheiro de Software Senior especialista em Python, Pandas, SQLAl
 - Uma unica transacao bancaria pode ser dividida (split) em multiplas categorias/centros de custo.
 - A soma dos splits **deve obrigatoriamente** fechar com o valor da transacao original.
 
-### 5. Conciliacao Bancaria
+### 5. Folha — Ferias e 13o (regime de caixa)
+- **Nao ha provisao mensal** de ferias nem de 13o salario (decisao dos diretores do projeto).
+- Encargos mensais = INSS Patronal 20% + FGTS 8% + PIS 1% + Terceiros 5,8% (fator 1,348).
+- **13o:** calculado no fechamento de dezembro — `salario_bruto x avos / 12`
+  (avos = meses com 15+ dias trabalhados), com os mesmos encargos patronais.
+- **Ferias:** registradas na aba "Ferias e 13o" (tecnico, data de inicio, dias).
+  `ferias = salario/30 x dias`, mais 1/3 constitucional; encargos sobre `ferias + 1/3`.
+- O Recibo de Encargos mensal inclui automaticamente o bloco de 13o quando o mes
+  de referencia e dezembro, e o bloco de ferias quando ha ferias iniciadas no mes.
+- **As aliquotas nunca mudam** entre folha mensal, 13o e ferias.
+
+### 6. Conciliacao Bancaria
 - O projeto usa conta bancaria exclusiva.
 - Importacao OFX com deduplicacao por FITID.
 - Transacao so e marcada como conciliada quando 100% alocada.

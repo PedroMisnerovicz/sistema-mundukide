@@ -20,6 +20,7 @@ from database import get_session
 from models import (
     CentroCusto,
     CategoriaDespesa,
+    FeriasTecnico,
     LancamentoRecorrente,
     Tecnico,
 )
@@ -59,16 +60,19 @@ ALIQUOTA_PIS_FOLHA = Decimal("0.01")       # 1% sobre folha
 ALIQUOTA_TERCEIROS = Decimal("0.058")      # 5,8% (Sistema S: Sal-Educacao 2,5% + INCRA 0,2% + SESI 1,5% + SENAI 1,0% + SEBRAE 0,6%)
 
 
-# Fator multiplicador: salario_bruto * FATOR = custo_total
-# FATOR = 1 + INSS_PAT(0.20) + FGTS(0.08) + PIS(0.01) + TERCEIROS(0.058) + FERIAS(4/36) + 13o(1/12)
+# Fator multiplicador MENSAL: salario_bruto * FATOR = custo_total do mes
+# FATOR = 1 + INSS_PAT(0.20) + FGTS(0.08) + PIS(0.01) + TERCEIROS(0.058)
+#
+# IMPORTANTE (decisao dos diretores do projeto):
+# Nao ha provisao mensal de ferias nem de 13o salario. Os encargos de ferias e
+# de 13o sao calculados e apresentados APENAS quando o pagamento e efetivado
+# (13o em dezembro; ferias quando de fato gozadas — ver aba "Ferias e 13o").
 FATOR_CUSTO_TOTAL = (
     Decimal("1")
     + ALIQUOTA_INSS_PATRONAL
     + ALIQUOTA_FGTS
     + ALIQUOTA_PIS_FOLHA
     + ALIQUOTA_TERCEIROS
-    + Decimal("4") / Decimal("36")   # provisao ferias: (sal + 1/3) / 12
-    + Decimal("1") / Decimal("12")   # provisao 13o: sal / 12
 )
 
 
@@ -94,8 +98,6 @@ TRADUCOES_FOLHA = {
         "fgts": "FGTS",
         "pis": "PIS",
         "terceiros": "Terceiros",
-        "prov_ferias": "Prov. Ferias",
-        "prov_13": "Prov. 13o",
         "total_descontos": "Total Descontos",
         "total_encargos": "Total Encargos",
         "custo_total": "Custo Total Mensal",
@@ -112,6 +114,24 @@ TRADUCOES_FOLHA = {
         "dias_mes": "Dias no Mes",
         "fator_proporcional": "Fator Proporcional",
         "nota": "Observacoes",
+        "decimo_section": "13o Salario - Encargos Efetivados",
+        "ferias_section": "Ferias Gozadas - Encargos Efetivados",
+        "titulo_recibo_13": "Recibo de Encargos do 13o Salario - Projeto Mundukide",
+        "titulo_recibo_ferias": "Recibo de Encargos de Ferias - Projeto Mundukide",
+        "avos": "Avos (meses)",
+        "valor_13": "Valor 13o",
+        "valor_ferias": "Ferias",
+        "terco": "1/3 Constitucional",
+        "base_calculo": "Base de Calculo",
+        "dias_ferias": "Dias de Ferias",
+        "periodo": "Periodo",
+        "valor_liquido": "Valor Liquido",
+        "custo_total": "Custo Total",
+        "ano_referencia": "Ano de Referencia",
+        "sem_provisao": (
+            "Sem provisao mensal de ferias e 13o salario. Estes encargos sao "
+            "calculados apenas no mes em que o pagamento e efetivado."
+        ),
     },
     "es": {
         "titulo_pdf": "Nomina - Proyecto Mundukide",
@@ -133,8 +153,6 @@ TRADUCOES_FOLHA = {
         "fgts": "FGTS",
         "pis": "PIS",
         "terceiros": "Terceros",
-        "prov_ferias": "Prov. Vacaciones",
-        "prov_13": "Prov. 13o",
         "total_descontos": "Total Descuentos",
         "total_encargos": "Total Cargas Sociales",
         "custo_total": "Costo Total Mensual",
@@ -151,6 +169,24 @@ TRADUCOES_FOLHA = {
         "dias_mes": "Dias del Mes",
         "fator_proporcional": "Factor Proporcional",
         "nota": "Observaciones",
+        "decimo_section": "13o Salario - Cargas Efectivadas",
+        "ferias_section": "Vacaciones Disfrutadas - Cargas Efectivadas",
+        "titulo_recibo_13": "Recibo de Cargas del 13o Salario - Proyecto Mundukide",
+        "titulo_recibo_ferias": "Recibo de Cargas de Vacaciones - Proyecto Mundukide",
+        "avos": "Avos (meses)",
+        "valor_13": "Valor 13o",
+        "valor_ferias": "Vacaciones",
+        "terco": "1/3 Constitucional",
+        "base_calculo": "Base de Calculo",
+        "dias_ferias": "Dias de Vacaciones",
+        "periodo": "Periodo",
+        "valor_liquido": "Valor Neto",
+        "custo_total": "Costo Total",
+        "ano_referencia": "Ano de Referencia",
+        "sem_provisao": (
+            "Sin provision mensual de vacaciones ni 13o salario. Estas cargas se "
+            "calculan solo en el mes en que el pago se efectiva."
+        ),
     },
 }
 
@@ -210,31 +246,150 @@ def calcular_irrf(salario: Decimal, inss: Decimal) -> Decimal:
     return irrf_bruto
 
 
+def calcular_encargos_patronais(base: Decimal) -> dict:
+    """Encargos patronais sobre uma base qualquer (salario, 13o ou ferias).
+
+    Mesmas aliquotas em todos os casos: INSS Patronal 20%, FGTS 8%,
+    PIS sobre folha 1% e Terceiros (Sistema S) 5,8%.
+    """
+    inss_patronal = _q2(base * ALIQUOTA_INSS_PATRONAL)
+    fgts = _q2(base * ALIQUOTA_FGTS)
+    pis = _q2(base * ALIQUOTA_PIS_FOLHA)
+    terceiros = _q2(base * ALIQUOTA_TERCEIROS)
+    return {
+        "inss_patronal": inss_patronal,
+        "fgts": fgts,
+        "pis": pis,
+        "terceiros": terceiros,
+        "total_encargos": _q2(inss_patronal + fgts + pis + terceiros),
+    }
+
+
 def calcular_folha_tecnico(salario: Decimal) -> dict:
-    """Retorna dict com todos os componentes da folha para um salario."""
+    """Retorna dict com todos os componentes da folha mensal para um salario.
+
+    Sem provisao de ferias e de 13o — esses encargos entram apenas no mes em
+    que o pagamento e efetivado.
+    """
     inss = calcular_inss(salario)
     irrf = calcular_irrf(salario, inss)
-    fgts = _q2(salario * ALIQUOTA_FGTS)
-    pis = _q2(salario * ALIQUOTA_PIS_FOLHA)
-    terceiros = _q2(salario * ALIQUOTA_TERCEIROS)
-    inss_patronal = _q2(salario * ALIQUOTA_INSS_PATRONAL)
-    prov_ferias = _q2(salario * Decimal("4") / Decimal("36"))  # (sal + 1/3) / 12
-    prov_13 = _q2(salario / Decimal("12"))
+    enc = calcular_encargos_patronais(salario)
     liquido = _q2(salario - inss - irrf)
 
     return {
         "salario_bruto": salario,
         "inss": inss,
         "irrf": irrf,
-        "fgts": fgts,
-        "pis": pis,
-        "terceiros": terceiros,
-        "inss_patronal": inss_patronal,
-        "prov_ferias": prov_ferias,
-        "prov_13": prov_13,
+        "fgts": enc["fgts"],
+        "pis": enc["pis"],
+        "terceiros": enc["terceiros"],
+        "inss_patronal": enc["inss_patronal"],
         "salario_liquido": liquido,
         "total_descontos": _q2(inss + irrf),
-        "total_encargos": _q2(inss_patronal + fgts + pis + terceiros + prov_ferias + prov_13),
+        "total_encargos": enc["total_encargos"],
+    }
+
+
+# ── 13o Salario (efetivado em dezembro) ────────────────────
+
+def avos_13(data_admissao: date, ano_ref: int) -> int:
+    """Numero de avos (meses) de 13o a que o tecnico tem direito no ano.
+
+    Regra CLT: conta o mes em que trabalhou 15 dias ou mais.
+    """
+    if data_admissao.year > ano_ref:
+        return 0
+    if data_admissao.year < ano_ref:
+        return 12
+
+    primeiro_mes = data_admissao.month
+    _, dias_no_mes = monthrange(ano_ref, primeiro_mes)
+    dias_trabalhados = dias_no_mes - data_admissao.day + 1
+    avos = 12 - primeiro_mes + 1
+    if dias_trabalhados < 15:
+        avos -= 1
+    return max(avos, 0)
+
+
+def calcular_decimo_terceiro(salario: Decimal, avos: int) -> dict:
+    """Calcula o 13o salario e seus encargos (pagamento efetivado).
+
+    Base do 13o = salario_bruto x avos / 12.
+    Descontos do empregado (INSS e IRRF) incidem sobre o 13o de forma
+    separada do salario mensal; encargos patronais usam as mesmas aliquotas.
+    """
+    if avos <= 0 or salario <= 0:
+        avos = max(avos, 0)
+        zero = Decimal("0.00")
+        return {
+            "avos": avos, "valor_13": zero, "inss": zero, "irrf": zero,
+            "inss_patronal": zero, "fgts": zero, "pis": zero, "terceiros": zero,
+            "total_descontos": zero, "total_encargos": zero,
+            "valor_liquido": zero, "custo_total": zero,
+        }
+
+    valor_13 = _q2(salario * Decimal(str(avos)) / Decimal("12"))
+    inss = calcular_inss(valor_13)
+    irrf = calcular_irrf(valor_13, inss)
+    enc = calcular_encargos_patronais(valor_13)
+
+    return {
+        "avos": avos,
+        "valor_13": valor_13,
+        "inss": inss,
+        "irrf": irrf,
+        "inss_patronal": enc["inss_patronal"],
+        "fgts": enc["fgts"],
+        "pis": enc["pis"],
+        "terceiros": enc["terceiros"],
+        "total_descontos": _q2(inss + irrf),
+        "total_encargos": enc["total_encargos"],
+        "valor_liquido": _q2(valor_13 - inss - irrf),
+        "custo_total": _q2(valor_13 + enc["total_encargos"]),
+    }
+
+
+# ── Ferias (efetivadas quando gozadas) ─────────────────────
+
+def calcular_ferias(salario: Decimal, dias: int) -> dict:
+    """Calcula ferias gozadas e seus encargos.
+
+    Ferias = salario / 30 x dias; adicional constitucional = 1/3 das ferias.
+    Base de incidencia = ferias + 1/3. Encargos patronais com as mesmas
+    aliquotas do salario mensal.
+    """
+    if salario <= 0 or dias <= 0:
+        zero = Decimal("0.00")
+        return {
+            "dias": max(dias, 0), "valor_ferias": zero, "terco": zero, "base": zero,
+            "inss": zero, "irrf": zero, "inss_patronal": zero, "fgts": zero,
+            "pis": zero, "terceiros": zero, "total_descontos": zero,
+            "total_encargos": zero, "valor_liquido": zero, "custo_total": zero,
+        }
+
+    valor_ferias = _q2(salario / Decimal("30") * Decimal(str(dias)))
+    terco = _q2(valor_ferias / Decimal("3"))
+    base = _q2(valor_ferias + terco)
+
+    inss = calcular_inss(base)
+    irrf = calcular_irrf(base, inss)
+    enc = calcular_encargos_patronais(base)
+
+    return {
+        "dias": dias,
+        "valor_ferias": valor_ferias,
+        "terco": terco,
+        "base": base,
+        "inss": inss,
+        "irrf": irrf,
+        "inss_patronal": enc["inss_patronal"],
+        "fgts": enc["fgts"],
+        "pis": enc["pis"],
+        "terceiros": enc["terceiros"],
+        "total_descontos": _q2(inss + irrf),
+        "total_encargos": enc["total_encargos"],
+        "valor_liquido": _q2(base - inss - irrf),
+        "custo_total": _q2(base + enc["total_encargos"]),
     }
 
 
@@ -404,15 +559,15 @@ def _gerar_pdf_folha(session, idioma: str = "pt", ano_ref: int = None, mes_ref: 
     calc_cols = [
         t("tecnico"), t("salario_bruto"), t("inss"), t("irrf"),
         t("salario_liquido"), t("inss_patronal"), t("fgts"),
-        t("pis"), t("terceiros"), t("prov_ferias"), t("prov_13"),
+        t("pis"), t("terceiros"), t("total_encargos"),
     ]
-    calc_w = [45, 26, 22, 22, 25, 25, 22, 18, 24, 24, 24]
+    calc_w = [58, 28, 24, 24, 28, 28, 24, 20, 26, 32]
 
     _pdf_table_header(pdf, calc_cols, calc_w)
 
     totais = {k: Decimal("0") for k in [
         "salario_bruto", "inss", "irrf", "fgts", "pis", "terceiros",
-        "inss_patronal", "prov_ferias", "prov_13", "salario_liquido",
+        "inss_patronal", "salario_liquido",
         "total_descontos", "total_encargos",
     ]}
 
@@ -435,8 +590,7 @@ def _gerar_pdf_folha(session, idioma: str = "pt", ano_ref: int = None, mes_ref: 
             _fmt(folha["fgts"]),
             _fmt(folha["pis"]),
             _fmt(folha["terceiros"]),
-            _fmt(folha["prov_ferias"]),
-            _fmt(folha["prov_13"]),
+            _fmt(folha["total_encargos"]),
         ], calc_w)
 
         for k in totais:
@@ -453,11 +607,15 @@ def _gerar_pdf_folha(session, idioma: str = "pt", ano_ref: int = None, mes_ref: 
         _fmt(totais["fgts"]),
         _fmt(totais["pis"]),
         _fmt(totais["terceiros"]),
-        _fmt(totais["prov_ferias"]),
-        _fmt(totais["prov_13"]),
+        _fmt(totais["total_encargos"]),
     ], calc_w, bold=True)
 
-    pdf.ln(5)
+    pdf.ln(3)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_text_color(90, 90, 90)
+    pdf.multi_cell(0, 5, t("sem_provisao"))
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(3)
 
     # ── Secao 3: Resumo ──
     _pdf_section(pdf, t("resumo_section"))
@@ -515,8 +673,10 @@ def _gerar_pdf_folha(session, idioma: str = "pt", ano_ref: int = None, mes_ref: 
 def _gerar_pdf_encargos(session, idioma: str = "pt", ano_ref: int = None, mes_ref: int = None, nota: str = "") -> bytes:
     """Gera recibo mensal contendo APENAS os encargos do mes (sem salarios/descontos).
 
-    Inclui os 6 encargos: INSS Patronal, FGTS, PIS, Terceiros, Provisao de Ferias
-    e Provisao de 13o — totalizando o mesmo "Total Encargos" exibido no sistema.
+    Inclui os 4 encargos mensais: INSS Patronal, FGTS, PIS e Terceiros.
+    Nao ha provisao de ferias nem de 13o. Quando o mes de referencia for
+    dezembro, o recibo acrescenta a secao de encargos do 13o salario; quando
+    houver ferias registradas com inicio no mes, acrescenta a secao de ferias.
     Aplica o calculo proporcional no mes de admissao.
     """
     t = lambda k: _tf(k, idioma)
@@ -565,14 +725,13 @@ def _gerar_pdf_encargos(session, idioma: str = "pt", ano_ref: int = None, mes_re
 
     cols = [
         t("tecnico"), t("inss_patronal"), t("fgts"), t("pis"),
-        t("terceiros"), t("prov_ferias"), t("prov_13"), t("total_encargos"),
+        t("terceiros"), t("total_encargos"),
     ]
-    larguras = [60, 32, 28, 22, 30, 32, 28, 35]
+    larguras = [85, 40, 35, 30, 38, 42]
     _pdf_table_header(pdf, cols, larguras)
 
     totais = {k: Decimal("0") for k in [
-        "inss_patronal", "fgts", "pis", "terceiros",
-        "prov_ferias", "prov_13", "total_encargos",
+        "inss_patronal", "fgts", "pis", "terceiros", "total_encargos",
     ]}
 
     for tc in tecnicos:
@@ -590,8 +749,6 @@ def _gerar_pdf_encargos(session, idioma: str = "pt", ano_ref: int = None, mes_re
             _fmt(folha["fgts"]),
             _fmt(folha["pis"]),
             _fmt(folha["terceiros"]),
-            _fmt(folha["prov_ferias"]),
-            _fmt(folha["prov_13"]),
             _fmt(folha["total_encargos"]),
         ], larguras)
 
@@ -605,21 +762,232 @@ def _gerar_pdf_encargos(session, idioma: str = "pt", ano_ref: int = None, mes_re
         _fmt(totais["fgts"]),
         _fmt(totais["pis"]),
         _fmt(totais["terceiros"]),
-        _fmt(totais["prov_ferias"]),
-        _fmt(totais["prov_13"]),
         _fmt(totais["total_encargos"]),
     ], larguras, bold=True)
 
-    pdf.ln(6)
+    pdf.ln(3)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_text_color(90, 90, 90)
+    pdf.multi_cell(0, 5, t("sem_provisao"))
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(3)
+
+    total_geral = totais["total_encargos"]
+
+    # ── Secao adicional: 13o salario (apenas em dezembro) ──
+    if mes_ref == 12:
+        total_13 = _pdf_bloco_13(pdf, tecnicos, ano_ref, idioma)
+        total_geral = _q2(total_geral + total_13)
+
+    # ── Secao adicional: ferias iniciadas no mes ──
+    ferias_mes = _ferias_do_mes(session, ano_ref, mes_ref)
+    if ferias_mes:
+        total_fer = _pdf_bloco_ferias(pdf, ferias_mes, idioma)
+        total_geral = _q2(total_geral + total_fer)
+
+    pdf.ln(4)
 
     # Destaque do total de encargos
     pdf.set_font("Helvetica", "B", 13)
     pdf.set_text_color(44, 62, 80)
     pdf.cell(
         0, 10,
-        f"{t('total_encargos')}: {_fmt(totais['total_encargos'])}",
+        f"{t('total_encargos')}: {_fmt(total_geral)}",
         new_x="LMARGIN", new_y="NEXT",
     )
+    pdf.set_text_color(0, 0, 0)
+
+    return bytes(pdf.output())
+
+
+# ── Blocos reutilizaveis de 13o e ferias no PDF ────────────
+
+def _ferias_do_mes(session, ano_ref: int, mes_ref: int) -> list:
+    """Registros de ferias cujo inicio cai no mes de referencia."""
+    return [
+        f for f in session.query(FeriasTecnico).order_by(FeriasTecnico.data_inicio).all()
+        if f.data_inicio.year == ano_ref and f.data_inicio.month == mes_ref
+    ]
+
+
+def _pdf_bloco_13(pdf: FPDF, tecnicos: list, ano_ref: int, idioma: str) -> Decimal:
+    """Escreve a tabela de encargos do 13o e devolve o total de encargos."""
+    t = lambda k: _tf(k, idioma)
+
+    _pdf_section(pdf, f"{t('decimo_section')} - {ano_ref}")
+    cols = [
+        t("tecnico"), t("avos"), t("valor_13"), t("inss_patronal"),
+        t("fgts"), t("pis"), t("terceiros"), t("total_encargos"),
+    ]
+    larguras = [60, 24, 32, 34, 28, 24, 32, 36]
+    _pdf_table_header(pdf, cols, larguras)
+
+    totais = {k: Decimal("0") for k in [
+        "valor_13", "inss_patronal", "fgts", "pis", "terceiros", "total_encargos",
+    ]}
+
+    for tc in tecnicos:
+        d = calcular_decimo_terceiro(tc.salario_bruto, avos_13(tc.data_admissao, ano_ref))
+        if d["valor_13"] <= 0:
+            continue
+        _pdf_table_row(pdf, [
+            tc.nome,
+            f"{d['avos']}/12",
+            _fmt(d["valor_13"]),
+            _fmt(d["inss_patronal"]),
+            _fmt(d["fgts"]),
+            _fmt(d["pis"]),
+            _fmt(d["terceiros"]),
+            _fmt(d["total_encargos"]),
+        ], larguras)
+        for k in totais:
+            totais[k] += d[k]
+
+    _pdf_table_row(pdf, [
+        t("total"),
+        "",
+        _fmt(totais["valor_13"]),
+        _fmt(totais["inss_patronal"]),
+        _fmt(totais["fgts"]),
+        _fmt(totais["pis"]),
+        _fmt(totais["terceiros"]),
+        _fmt(totais["total_encargos"]),
+    ], larguras, bold=True)
+    pdf.ln(5)
+
+    return totais["total_encargos"]
+
+
+def _pdf_bloco_ferias(pdf: FPDF, registros: list, idioma: str) -> Decimal:
+    """Escreve a tabela de encargos de ferias e devolve o total de encargos."""
+    t = lambda k: _tf(k, idioma)
+
+    _pdf_section(pdf, t("ferias_section"))
+    cols = [
+        t("tecnico"), t("periodo"), t("dias_ferias"), t("valor_ferias"),
+        t("terco"), t("inss_patronal"), t("fgts"), t("pis"),
+        t("terceiros"), t("total_encargos"),
+    ]
+    larguras = [44, 26, 20, 28, 30, 30, 26, 20, 28, 33]
+    _pdf_table_header(pdf, cols, larguras)
+
+    totais = {k: Decimal("0") for k in [
+        "valor_ferias", "terco", "inss_patronal", "fgts",
+        "pis", "terceiros", "total_encargos",
+    ]}
+
+    for reg in registros:
+        f = calcular_ferias(reg.salario_base, reg.dias)
+        nome = reg.tecnico.nome if reg.tecnico else "—"
+        _pdf_table_row(pdf, [
+            nome,
+            reg.data_inicio.strftime("%d/%m/%Y"),
+            str(reg.dias),
+            _fmt(f["valor_ferias"]),
+            _fmt(f["terco"]),
+            _fmt(f["inss_patronal"]),
+            _fmt(f["fgts"]),
+            _fmt(f["pis"]),
+            _fmt(f["terceiros"]),
+            _fmt(f["total_encargos"]),
+        ], larguras)
+        for k in totais:
+            totais[k] += f[k]
+
+    _pdf_table_row(pdf, [
+        t("total"), "", "",
+        _fmt(totais["valor_ferias"]),
+        _fmt(totais["terco"]),
+        _fmt(totais["inss_patronal"]),
+        _fmt(totais["fgts"]),
+        _fmt(totais["pis"]),
+        _fmt(totais["terceiros"]),
+        _fmt(totais["total_encargos"]),
+    ], larguras, bold=True)
+    pdf.ln(5)
+
+    return totais["total_encargos"]
+
+
+def _pdf_cabecalho(pdf: FPDF, titulo: str, subtitulo: str, nota: str, idioma: str):
+    """Titulo + subtitulo + nota opcional no topo de um recibo."""
+    t = lambda k: _tf(k, idioma)
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.cell(0, 12, titulo, new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 8, subtitulo, new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(5)
+
+    if nota and nota.strip():
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_text_color(44, 62, 80)
+        pdf.cell(0, 6, t("nota") + ":", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_fill_color(245, 245, 245)
+        pdf.multi_cell(0, 6, nota.strip(), border=1, fill=True)
+        pdf.ln(4)
+
+
+def _gerar_pdf_13(session, idioma: str = "pt", ano_ref: int = None, nota: str = "") -> bytes:
+    """Recibo avulso dos encargos do 13o salario de um ano."""
+    t = lambda k: _tf(k, idioma)
+    if ano_ref is None:
+        ano_ref = date.today().year
+
+    tecnicos = (
+        session.query(Tecnico)
+        .filter(Tecnico.ativo == True)
+        .order_by(Tecnico.nome)
+        .all()
+    )
+
+    pdf = FPDF(orientation="L", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    _pdf_cabecalho(
+        pdf,
+        t("titulo_recibo_13"),
+        f"{t('ano_referencia')}: {ano_ref}  |  {t('gerado_em')}: {date.today().strftime('%d/%m/%Y')}",
+        nota, idioma,
+    )
+
+    total = _pdf_bloco_13(pdf, tecnicos, ano_ref, idioma)
+
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.set_text_color(44, 62, 80)
+    pdf.cell(0, 10, f"{t('total_encargos')}: {_fmt(total)}", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(0, 0, 0)
+
+    return bytes(pdf.output())
+
+
+def _gerar_pdf_ferias(session, idioma: str = "pt", ano_ref: int = None, nota: str = "") -> bytes:
+    """Recibo avulso dos encargos de ferias gozadas em um ano."""
+    t = lambda k: _tf(k, idioma)
+    if ano_ref is None:
+        ano_ref = date.today().year
+
+    registros = [
+        f for f in session.query(FeriasTecnico).order_by(FeriasTecnico.data_inicio).all()
+        if f.data_inicio.year == ano_ref
+    ]
+
+    pdf = FPDF(orientation="L", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    _pdf_cabecalho(
+        pdf,
+        t("titulo_recibo_ferias"),
+        f"{t('ano_referencia')}: {ano_ref}  |  {t('gerado_em')}: {date.today().strftime('%d/%m/%Y')}",
+        nota, idioma,
+    )
+
+    total = _pdf_bloco_ferias(pdf, registros, idioma) if registros else Decimal("0.00")
+
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.set_text_color(44, 62, 80)
+    pdf.cell(0, 10, f"{t('total_encargos')}: {_fmt(total)}", new_x="LMARGIN", new_y="NEXT")
     pdf.set_text_color(0, 0, 0)
 
     return bytes(pdf.output())
@@ -632,9 +1000,10 @@ def render():
 
     session = get_session()
 
-    tab_cad, tab_calc, tab_gerar = st.tabs([
+    tab_cad, tab_calc, tab_extra, tab_gerar = st.tabs([
         "Cadastro de Tecnicos",
         "Calculo Mensal",
+        "Ferias e 13o",
         "Gerar Lancamentos Recorrentes",
     ])
 
@@ -643,6 +1012,9 @@ def render():
 
     with tab_calc:
         _aba_calculo(session)
+
+    with tab_extra:
+        _aba_ferias_13(session)
 
     with tab_gerar:
         _aba_gerar_recorrentes(session)
@@ -681,7 +1053,10 @@ def _aba_cadastro(session):
             bruto_prev = _to_decimal(salario)
             folha_prev = calcular_folha_tecnico(bruto_prev)
             custo_prev = _q2(bruto_prev + folha_prev["total_encargos"])
-            st.caption(f"Fator de custo total: {float(FATOR_CUSTO_TOTAL):.4f}x")
+            st.caption(
+                f"Fator de custo total mensal: {float(FATOR_CUSTO_TOTAL):.4f}x "
+                "(sem provisao de ferias e 13o — esses encargos entram apenas quando pagos)"
+            )
             cp1, cp2, cp3, cp4 = st.columns(4)
             cp1.metric("Salario Liquido", f"R$ {folha_prev['salario_liquido']:,.2f}")
             cp2.metric("Descontos (INSS+IRRF)", f"R$ {folha_prev['total_descontos']:,.2f}")
@@ -876,7 +1251,6 @@ def _aba_calculo(session):
         "irrf": Decimal("0"), "fgts": Decimal("0"),
         "pis": Decimal("0"), "terceiros": Decimal("0"),
         "inss_patronal": Decimal("0"),
-        "prov_ferias": Decimal("0"), "prov_13": Decimal("0"),
         "salario_liquido": Decimal("0"),
         "total_descontos": Decimal("0"), "total_encargos": Decimal("0"),
     }
@@ -909,8 +1283,7 @@ def _aba_calculo(session):
             "FGTS": f"R$ {l['fgts']:,.2f}",
             "PIS": f"R$ {l['pis']:,.2f}",
             "Terceiros": f"R$ {l['terceiros']:,.2f}",
-            "Prov. Ferias": f"R$ {l['prov_ferias']:,.2f}",
-            "Prov. 13o": f"R$ {l['prov_13']:,.2f}",
+            "Total Encargos": f"R$ {l['total_encargos']:,.2f}",
         })
 
     st.dataframe(pd.DataFrame(dados_display), use_container_width=True, hide_index=True)
@@ -959,13 +1332,16 @@ def _aba_calculo(session):
     col5.metric("INSS Patronal", f"R$ {totais['inss_patronal']:,.2f}")
     col6.metric("FGTS Total", f"R$ {totais['fgts']:,.2f}")
 
-    col7, col8, col9 = st.columns(3)
+    col7, col8, _ = st.columns(3)
     col7.metric("PIS sobre Folha", f"R$ {totais['pis']:,.2f}")
     col8.metric("Terceiros (5,8%)", f"R$ {totais['terceiros']:,.2f}")
-    col9.metric("Provisao Ferias", f"R$ {totais['prov_ferias']:,.2f}")
 
-    col10, _, _ = st.columns(3)
-    col10.metric("Provisao 13o", f"R$ {totais['prov_13']:,.2f}")
+    st.info(
+        "Sem provisao mensal de ferias e 13o salario. Esses encargos sao "
+        "calculados apenas quando o pagamento e efetivado — veja a aba **Ferias e 13o**. "
+        "No recibo de encargos, dezembro ja inclui o 13o automaticamente e os meses "
+        "com ferias registradas incluem os encargos das ferias."
+    )
 
     # Custo total mensal do projeto com pessoal
     custo_total = _q2(totais['salario_bruto'] + totais['total_encargos'])
@@ -981,7 +1357,8 @@ def _aba_calculo(session):
     st.caption(
         "PDF Completo: folha inteira (salarios, descontos e encargos). "
         "Recibo de Encargos: apenas os encargos do mes (INSS Patronal, FGTS, "
-        "PIS, Terceiros, Provisao de Ferias e 13o)."
+        "PIS e Terceiros) — em dezembro inclui tambem os encargos do 13o, e nos "
+        "meses com ferias registradas inclui os encargos das ferias."
     )
     col_lang, col_full, col_enc, _ = st.columns(
         [1.2, 1.3, 1.5, 2], vertical_alignment="bottom",
@@ -1028,6 +1405,205 @@ def _aba_calculo(session):
                 )
 
 
+# ─────────── Aba: Ferias e 13o Salario ────────────────────
+
+def _aba_ferias_13(session):
+    st.subheader("Ferias e 13o Salario — Encargos Efetivados")
+    st.caption(
+        "Nao ha provisao mensal. Os encargos de 13o sao calculados no fechamento "
+        "de dezembro e os de ferias no mes em que as ferias sao gozadas."
+    )
+
+    tecnicos = (
+        session.query(Tecnico)
+        .filter(Tecnico.ativo == True)
+        .order_by(Tecnico.nome)
+        .all()
+    )
+    if not tecnicos:
+        st.info("Cadastre pelo menos um tecnico primeiro.")
+        return
+
+    sub_13, sub_fer = st.tabs(["13o Salario (Dezembro)", "Ferias Gozadas"])
+
+    with sub_13:
+        _secao_13(session, tecnicos)
+
+    with sub_fer:
+        _secao_ferias(session, tecnicos)
+
+
+def _secao_13(session, tecnicos):
+    col_ano, _ = st.columns([1, 4])
+    ano_13 = col_ano.number_input(
+        "Ano de Referencia", min_value=2020, max_value=2035,
+        value=date.today().year, key="ano_13",
+    )
+
+    st.caption(
+        "13o = salario bruto x avos / 12 (avos = meses com 15 dias ou mais trabalhados). "
+        "Encargos patronais com as mesmas aliquotas do mes: INSS Patronal 20%, "
+        "FGTS 8%, PIS 1% e Terceiros 5,8%."
+    )
+
+    linhas = []
+    totais = {k: Decimal("0") for k in [
+        "valor_13", "inss", "irrf", "inss_patronal", "fgts",
+        "pis", "terceiros", "total_encargos", "valor_liquido", "custo_total",
+    ]}
+
+    for t in tecnicos:
+        d = calcular_decimo_terceiro(t.salario_bruto, avos_13(t.data_admissao, int(ano_13)))
+        linhas.append({
+            "Tecnico": t.nome,
+            "Avos": f"{d['avos']}/12",
+            "Valor 13o": f"R$ {d['valor_13']:,.2f}",
+            "INSS": f"R$ {d['inss']:,.2f}",
+            "IRRF": f"R$ {d['irrf']:,.2f}",
+            "Liquido": f"R$ {d['valor_liquido']:,.2f}",
+            "INSS Patronal": f"R$ {d['inss_patronal']:,.2f}",
+            "FGTS": f"R$ {d['fgts']:,.2f}",
+            "PIS": f"R$ {d['pis']:,.2f}",
+            "Terceiros": f"R$ {d['terceiros']:,.2f}",
+            "Total Encargos": f"R$ {d['total_encargos']:,.2f}",
+        })
+        for k in totais:
+            totais[k] += d[k]
+
+    st.dataframe(pd.DataFrame(linhas), use_container_width=True, hide_index=True)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total 13o Bruto", f"R$ {totais['valor_13']:,.2f}")
+    c2.metric("Total Encargos do 13o", f"R$ {totais['total_encargos']:,.2f}")
+    c3.metric("Custo Total do 13o", f"R$ {totais['custo_total']:,.2f}")
+
+    st.markdown("---")
+    col_l, col_b, _ = st.columns([1.2, 1.6, 2], vertical_alignment="bottom")
+    with col_l:
+        idioma_13 = st.selectbox("Idioma do PDF", ["Portugues", "Espanhol"], key="idioma_13_pdf")
+        lang_13 = "pt" if idioma_13 == "Portugues" else "es"
+    with col_b:
+        if st.button("Gerar Recibo do 13o", key="btn_pdf_13"):
+            st.session_state["pdf_13"] = _gerar_pdf_13(session, lang_13, int(ano_13))
+            st.rerun()
+
+    if "pdf_13" in st.session_state:
+        st.download_button(
+            "Baixar Recibo do 13o",
+            data=st.session_state["pdf_13"],
+            file_name=f"recibo_13o_{int(ano_13)}.pdf",
+            mime="application/pdf",
+            type="primary",
+            key="btn_dl_pdf_13",
+        )
+
+
+def _secao_ferias(session, tecnicos):
+    st.markdown("**Registrar ferias gozadas**")
+
+    opcoes_tec = {f"{t.nome} (R$ {t.salario_bruto:,.2f})": t.id for t in tecnicos}
+
+    with st.form("form_ferias", clear_on_submit=True):
+        col1, col2, col3 = st.columns(3)
+        tec_label = col1.selectbox("Tecnico *", list(opcoes_tec.keys()), key="fer_tec")
+        data_ini = col2.date_input("Data de inicio das ferias *", value=date.today(), key="fer_data")
+        dias_fer = col3.number_input(
+            "Dias de ferias *", min_value=1, max_value=30, value=30, step=1, key="fer_dias",
+        )
+        obs_fer = st.text_input("Observacao", max_chars=255, key="fer_obs")
+        registrar = st.form_submit_button("Registrar Ferias", type="primary")
+
+    if registrar:
+        tec = session.get(Tecnico, opcoes_tec[tec_label])
+        reg = FeriasTecnico(
+            tecnico_id=tec.id,
+            data_inicio=data_ini,
+            dias=int(dias_fer),
+            salario_base=tec.salario_bruto,
+            observacao=obs_fer.strip(),
+        )
+        session.add(reg)
+        session.commit()
+        f = calcular_ferias(tec.salario_bruto, int(dias_fer))
+        st.success(
+            f"Ferias de '{tec.nome}' registradas: {int(dias_fer)} dias. "
+            f"Encargos calculados: R$ {f['total_encargos']:,.2f}"
+        )
+        st.rerun()
+
+    st.caption(
+        "Ferias = salario bruto / 30 x dias; adicional de 1/3 sobre esse valor. "
+        "Encargos patronais sobre (ferias + 1/3) com as mesmas aliquotas: "
+        "INSS Patronal 20%, FGTS 8%, PIS 1% e Terceiros 5,8%."
+    )
+
+    registros = (
+        session.query(FeriasTecnico)
+        .order_by(FeriasTecnico.data_inicio.desc())
+        .all()
+    )
+
+    st.markdown("---")
+    if not registros:
+        st.info("Nenhuma ferias registrada ate o momento.")
+        return
+
+    st.markdown("**Ferias registradas**")
+    linhas = []
+    for r in registros:
+        f = calcular_ferias(r.salario_base, r.dias)
+        linhas.append({
+            "Tecnico": r.tecnico.nome if r.tecnico else "—",
+            "Inicio": r.data_inicio.strftime("%d/%m/%Y"),
+            "Dias": r.dias,
+            "Ferias": f"R$ {f['valor_ferias']:,.2f}",
+            "1/3": f"R$ {f['terco']:,.2f}",
+            "INSS": f"R$ {f['inss']:,.2f}",
+            "IRRF": f"R$ {f['irrf']:,.2f}",
+            "Liquido": f"R$ {f['valor_liquido']:,.2f}",
+            "INSS Patronal": f"R$ {f['inss_patronal']:,.2f}",
+            "FGTS": f"R$ {f['fgts']:,.2f}",
+            "PIS": f"R$ {f['pis']:,.2f}",
+            "Terceiros": f"R$ {f['terceiros']:,.2f}",
+            "Total Encargos": f"R$ {f['total_encargos']:,.2f}",
+        })
+    st.dataframe(pd.DataFrame(linhas), use_container_width=True, hide_index=True)
+
+    # Exclusao
+    opcoes_reg = {
+        f"{(r.tecnico.nome if r.tecnico else '—')} — {r.data_inicio.strftime('%d/%m/%Y')} ({r.dias} dias)": r.id
+        for r in registros
+    }
+    col_sel, col_del = st.columns([3, 1], vertical_alignment="bottom")
+    sel_reg = col_sel.selectbox("Selecione um registro para excluir", list(opcoes_reg.keys()), key="fer_sel_del")
+    if col_del.button("Excluir Registro", key="btn_del_ferias"):
+        session.delete(session.get(FeriasTecnico, opcoes_reg[sel_reg]))
+        session.commit()
+        st.success("Registro de ferias excluido.")
+        st.rerun()
+
+    # PDF
+    st.markdown("---")
+    anos = sorted({r.data_inicio.year for r in registros}, reverse=True)
+    col_a, col_l, col_b = st.columns([1, 1.2, 1.6], vertical_alignment="bottom")
+    ano_fer = col_a.selectbox("Ano", anos, key="ano_ferias_pdf")
+    idioma_fer = col_l.selectbox("Idioma do PDF", ["Portugues", "Espanhol"], key="idioma_ferias_pdf")
+    lang_fer = "pt" if idioma_fer == "Portugues" else "es"
+    if col_b.button("Gerar Recibo de Ferias", key="btn_pdf_ferias"):
+        st.session_state["pdf_ferias"] = _gerar_pdf_ferias(session, lang_fer, int(ano_fer))
+        st.rerun()
+
+    if "pdf_ferias" in st.session_state:
+        st.download_button(
+            "Baixar Recibo de Ferias",
+            data=st.session_state["pdf_ferias"],
+            file_name=f"recibo_ferias_{int(ano_fer)}.pdf",
+            mime="application/pdf",
+            type="primary",
+            key="btn_dl_pdf_ferias",
+        )
+
+
 # ─────────── Aba: Gerar Lancamentos Recorrentes ───────────
 
 def _aba_gerar_recorrentes(session):
@@ -1065,8 +1641,11 @@ def _aba_gerar_recorrentes(session):
         cat_fgts = st.selectbox("FGTS", cat_keys, key="cat_fgts")
         cat_pis = st.selectbox("PIS sobre Folha", cat_keys, key="cat_pis")
         cat_terceiros = st.selectbox("Terceiros (5,8%)", cat_keys, key="cat_terceiros")
-        cat_ferias = st.selectbox("Provisao de Ferias", cat_keys, key="cat_ferias")
-        cat_13 = st.selectbox("Provisao 13o Salario", cat_keys, key="cat_13")
+
+        st.caption(
+            "Ferias e 13o nao geram recorrentes mensais — sao lancados apenas "
+            "quando o pagamento e efetivado (aba Ferias e 13o)."
+        )
 
         st.markdown("---")
         st.markdown("**Dias previstos de pagamento (para match com o extrato bancario):**")
@@ -1077,7 +1656,7 @@ def _aba_gerar_recorrentes(session):
             help="Ex: 30 (ultimo dia util do mes)",
         )
         dia_encargos = col_dp2.number_input(
-            "Dia dos Encargos (INSS, IRRF, FGTS, PIS, Provisoes)",
+            "Dia dos Encargos (INSS, IRRF, FGTS, PIS, Terceiros)",
             min_value=1, max_value=31, value=20, step=1,
             help="Ex: 20 (dia padrao de recolhimento)",
         )
@@ -1118,8 +1697,6 @@ def _aba_gerar_recorrentes(session):
                 (cat_fgts, folha["fgts"], f"FGTS - {t.nome}", dia_encargos),
                 (cat_pis, folha["pis"], f"PIS Folha - {t.nome}", dia_encargos),
                 (cat_terceiros, folha["terceiros"], f"Terceiros (5,8%) - {t.nome}", dia_encargos),
-                (cat_ferias, folha["prov_ferias"], f"Prov. Ferias - {t.nome}", dia_encargos),
-                (cat_13, folha["prov_13"], f"Prov. 13o - {t.nome}", dia_encargos),
             ]
 
             for cat_key, valor, desc, dia_prev in componentes:

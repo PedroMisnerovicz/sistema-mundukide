@@ -118,8 +118,10 @@ def gerar():
     _section(pdf, "3. Encargos Patronais - Empresa Lucro Presumido")
     fator_str = f"{float(FATOR_CUSTO_TOTAL):.4f}".replace(".", ",")
     _caption(pdf,
-        f"Aliquotas fixas sobre o salario bruto. Fator total = 1 + 20% + 8% + 1% + 5,8% + 4/36 + 1/12 = aprox. {fator_str}x  "
-        f"=> Custo total = Salario bruto x Fator"
+        f"Aliquotas fixas sobre o salario bruto. Fator mensal = 1 + 20% + 8% + 1% + 5,8% = aprox. {fator_str}x  "
+        f"=> Custo total mensal = Salario bruto x Fator. "
+        f"NAO ha provisao mensal de ferias nem de 13o: esses encargos sao calculados apenas quando o pagamento e efetivado "
+        f"(13o em dezembro; ferias quando gozadas), com as mesmas aliquotas patronais."
     )
     cols = ["Encargo", "Aliquota", "Base de Calculo", "Observacao"]
     widths = [45, 25, 35, 75]
@@ -129,8 +131,8 @@ def gerar():
         ("FGTS", f"{ALIQUOTA_FGTS*100:.1f}%".replace(".", ","), "Salario bruto", "Fundo de Garantia por Tempo de Servico"),
         ("PIS sobre Folha", f"{ALIQUOTA_PIS_FOLHA*100:.1f}%".replace(".", ","), "Salario bruto", "Contribuicao social sobre a folha"),
         ("Terceiros (Sistema S)", f"{ALIQUOTA_TERCEIROS*100:.1f}%".replace(".", ","), "Salario bruto", "Sal-Educ + INCRA + SESI + SENAI + SEBRAE"),
-        ("Provisao Ferias", "11,11% (4/36)", "Salario bruto", "Inclui adicional de 1/3 / 12 meses"),
-        ("Provisao 13o Salario", "8,33% (1/12)", "Salario bruto", "Gratificacao natalina proporcional"),
+        ("Encargos do 13o", "20% + 8% + 1% + 5,8%", "Valor do 13o", "Somente em dezembro, sobre bruto x avos/12"),
+        ("Encargos de Ferias", "20% + 8% + 1% + 5,8%", "Ferias + 1/3", "Somente quando as ferias sao gozadas"),
     ]
     for nome, aliq, base, obs in encargos:
         _row(pdf, [nome, aliq, base, obs], widths, aligns=["L", "C", "C", "L"])
@@ -150,11 +152,13 @@ def gerar():
         ("FGTS", "Encargo patronal", "Salario Bruto x 8%"),
         ("PIS Folha", "Encargo patronal", "Salario Bruto x 1%"),
         ("Terceiros (Sistema S)", "Encargo patronal", "Salario Bruto x 5,8%"),
-        ("Provisao Ferias", "Encargo patronal", "Salario Bruto x 4/36 (aprox. 11,11%)"),
-        ("Provisao 13o", "Encargo patronal", "Salario Bruto / 12 (aprox. 8,33%)"),
         ("Total Descontos", "Consolidado", "INSS Empregado + IRRF"),
-        ("Total Encargos", "Consolidado", "INSS Pat + FGTS + PIS + Terceiros + Prov.Ferias + Prov.13o"),
+        ("Total Encargos", "Consolidado", "INSS Pat + FGTS + PIS + Terceiros"),
         ("Custo Total Mensal", "Consolidado", "Salario Bruto + Total Encargos"),
+        ("13o Salario", "Efetivado (dezembro)", "Salario Bruto x avos / 12 (avos = meses com 15+ dias)"),
+        ("Encargos do 13o", "Efetivado (dezembro)", "Valor do 13o x (20% + 8% + 1% + 5,8%)"),
+        ("Ferias", "Efetivado (quando gozadas)", "Salario Bruto / 30 x dias + 1/3 constitucional"),
+        ("Encargos de Ferias", "Efetivado (quando gozadas)", "(Ferias + 1/3) x (20% + 8% + 1% + 5,8%)"),
     ]
     for nome, tipo, formula in componentes:
         _row(pdf, [nome, tipo, formula], widths, aligns=["L", "C", "L"])
