@@ -46,6 +46,15 @@ MAPA_CATEGORIAS_FINANCIADOR = {
 }
 
 
+# De-para dos movimentos da aplicacao financeira para a coluna C_ACCOUNT.
+# Rendimento e receita nova do projeto; IR/IOF e o custo dessa receita.
+# Aplicacao e resgate NAO entram no export — sao so o dinheiro mudando de lugar.
+MAPA_MOVIMENTO_APLICACAO_FINANCIADOR = {
+    "RENDIMENTO": "INC Receita",
+    "IR_IOF": "F Outras despesas e H Projecto",
+}
+
+
 def _normalizar_nome_categoria(nome: str) -> str:
     if not nome:
         return ""
@@ -58,6 +67,7 @@ from models import (
     CentroCusto,
     CategoriaDespesa,
     ItemDespesa,
+    MovimentoAplicacao,
     Remessa,
 )
 
@@ -701,6 +711,62 @@ def _gerar_xlsx_financiador(session, cambio, data_ini=None, data_fim=None):
             "C_COFINA": "NO EXISTE",
             "C_EXPENSE_STATE": "NO EXISTE",
             "C_ID": item.id,
+            "C_ORGANIZATION": "Brasil Sul",
+            "C_COUNTRY": "Brasil",
+            "C_EUR_EQUI": round(valor_eur, 6),
+            "C_FIN_EURO": round(valor_eur, 6),
+            "C_COF_EURO": round(valor_eur, 6),
+        })
+
+    # ── Rendimento e IR/IOF da aplicacao financeira ──
+    # Nao sao despesas de projeto (ficam em MovimentoAplicacao), mas o financiador
+    # precisa ver o rendimento como receita (INC Receita) e o IR/IOF como despesa
+    # (F Outras despesas e H Projecto). Aplicacao e resgate ficam de fora: o
+    # dinheiro so mudou de lugar entre a conta corrente e o fundo.
+    query_mov = session.query(MovimentoAplicacao).filter(
+        MovimentoAplicacao.tipo.in_(("RENDIMENTO", "IR_IOF")),
+    )
+    if data_ini is not None:
+        query_mov = query_mov.filter(MovimentoAplicacao.data >= data_ini)
+    if data_fim is not None:
+        query_mov = query_mov.filter(MovimentoAplicacao.data <= data_fim)
+    movimentos = query_mov.order_by(
+        MovimentoAplicacao.data, MovimentoAplicacao.id,
+    ).all()
+
+    ROTULO_MOV = {
+        "RENDIMENTO": "Rendimento de aplicação financeira",
+        "IR_IOF": "IR/IOF sobre rendimento de aplicação financeira",
+    }
+    for mov in movimentos:
+        valor_pos = float(mov.valor_brl)
+        # Rendimento entra como receita (+); IR/IOF como despesa (-).
+        valor_brl = valor_pos if mov.tipo == "RENDIMENTO" else -valor_pos
+        valor_eur = (valor_brl / cambio_f) if cambio_f else 0.0
+
+        rotulo = ROTULO_MOV[mov.tipo]
+        descricao = (
+            f"{rotulo} - {mov.descricao}".rstrip(" -")
+            if mov.descricao else rotulo
+        )
+
+        linhas.append({
+            "C_CREATED_DATE": mov.data,
+            "C_DESCRIPTION": descricao,
+            "C_CONTRACT": "M349BN1-BR",
+            "C_ACCOUNT": MAPA_MOVIMENTO_APLICACAO_FINANCIADOR[mov.tipo],
+            "C_TAGS": "",
+            "C_TAGS_IDS": "",
+            "C_AMOUNT": round(valor_brl, 2),
+            "C_CURRENCY": "BRL",
+            "C_ACTIVITY": "Programa Brasil",
+            "C_RECEIPT": "",
+            "C_RECEIPT_PICTURE": "",
+            "C_USER": "EXT BRAS, FINAPOP @finapop",
+            "C_FINA": "NO EXISTE",
+            "C_COFINA": "NO EXISTE",
+            "C_EXPENSE_STATE": "NO EXISTE",
+            "C_ID": f"APL-{mov.id}",
             "C_ORGANIZATION": "Brasil Sul",
             "C_COUNTRY": "Brasil",
             "C_EUR_EQUI": round(valor_eur, 6),
