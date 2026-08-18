@@ -28,6 +28,7 @@ from sqlalchemy import extract, func as sqlfunc
 MAPA_CATEGORIAS_FINANCIADOR = {
     "alimentacao": "B Alimentação e alojamento",
     "alojamento": "B Alimentação e alojamento",
+    "aluguel de carro": "A Transporte",
     "assessoria contabil": "E Serviços",
     "assessoria juridica": "E Serviços",
     "combustivel": "A Transporte",
