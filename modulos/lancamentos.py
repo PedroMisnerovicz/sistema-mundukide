@@ -679,21 +679,45 @@ def _gerar_template_excel_reembolso(opcoes_cat: dict, atividades: list | None = 
     return buffer.getvalue()
 
 
-def _parse_data_emissao(valor):
-    """Aceita date, datetime ou string em formatos comuns. Retorna date ou None."""
+_FORMATOS_DATA_BR = ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y", "%d.%m.%Y")
+# Fallback: Excel em ingles grava a data digitada como texto "MM/DD/YYYY".
+_FORMATOS_DATA_US = ("%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y")
+
+
+def _parse_data_emissao_detalhado(valor):
+    """Aceita date, datetime ou string em formatos comuns.
+
+    Retorna (date | None, formato_us: bool). `formato_us` e True quando a
+    string so pode ser lida como mes/dia/ano (ex.: '08/13/2026'), para o
+    importador avisar o usuario.
+    """
     if valor in (None, ""):
-        return None
+        return None, False
     if isinstance(valor, datetime):
-        return valor.date()
+        return valor.date(), False
     if isinstance(valor, date):
-        return valor
+        return valor, False
     if isinstance(valor, str):
-        for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y"):
+        s = valor.strip()
+        # Descarta hora, se vier junto ("13/08/2026 00:00:00")
+        if " " in s:
+            s = s.split(" ")[0]
+        for fmt in _FORMATOS_DATA_BR:
             try:
-                return datetime.strptime(valor.strip(), fmt).date()
+                return datetime.strptime(s, fmt).date(), False
             except ValueError:
                 continue
-    return None
+        for fmt in _FORMATOS_DATA_US:
+            try:
+                return datetime.strptime(s, fmt).date(), True
+            except ValueError:
+                continue
+    return None, False
+
+
+def _parse_data_emissao(valor):
+    """Aceita date, datetime ou string em formatos comuns. Retorna date ou None."""
+    return _parse_data_emissao_detalhado(valor)[0]
 
 
 def _parse_valor_reembolso(valor):
@@ -759,6 +783,8 @@ def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict, atividades_por
 
     itens = []
     erros = []
+    avisos = []
+    hoje = date.today()
     # Tabela comeca na linha 8. Linhas 5 (CPF/CNPJ) e 6 (PIX) sao apenas
     # controle interno do beneficiario e nao entram no Streamlit.
     linha = 8
@@ -779,7 +805,7 @@ def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict, atividades_por
         cat_s = _str_celula(cat_raw)
         ativ_s = _str_celula(ativ_raw)
 
-        data_dt = _parse_data_emissao(data_raw)
+        data_dt, data_formato_us = _parse_data_emissao_detalhado(data_raw)
         valor_dec = _parse_valor_reembolso(valor_raw)
         cat_id_resolvido = _resolver_categoria_excel(cat_s, opcoes_cat, opcoes_excel)
 
@@ -800,9 +826,23 @@ def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict, atividades_por
             linha += 1
             continue
         if data_dt is None:
-            erros.append(f"Linha {linha}: data de emissao invalida ou ausente.")
+            erros.append(
+                f"Linha {linha}: data de emissao invalida ou ausente "
+                f"('{_str_celula(data_raw) or '(vazia)'}'). Use o formato DD/MM/AAAA."
+            )
             linha += 1
             continue
+        data_fmt = data_dt.strftime("%d/%m/%Y")
+        if data_formato_us:
+            avisos.append(
+                f"Linha {linha}: data '{_str_celula(data_raw)}' estava em formato "
+                f"americano (mes/dia) e foi lida como {data_fmt}. Confira."
+            )
+        elif data_dt > hoje:
+            avisos.append(
+                f"Linha {linha}: data de emissao {data_fmt} esta no futuro. "
+                f"Dia e mes podem estar trocados — confira."
+            )
         if valor_dec is None or valor_dec <= 0:
             erros.append(f"Linha {linha}: valor invalido ('{valor_raw}').")
             linha += 1
@@ -836,7 +876,13 @@ def _importar_template_excel_reembolso(arquivo, opcoes_cat: dict, atividades_por
 
     msg = f"{len(itens)} despesa(s) importada(s) com sucesso."
     if erros:
-        msg += f" {len(erros)} linha(s) ignorada(s): " + " | ".join(erros[:5])
+        msg += (
+            f"\n\n**{len(erros)} linha(s) IGNORADA(S)** — corrija na planilha e "
+            "importe de novo, ou adicione manualmente abaixo:\n- "
+            + "\n- ".join(erros[:10])
+        )
+    if avisos:
+        msg += "\n\n**Atencao:**\n- " + "\n- ".join(avisos[:10])
     return True, msg
 
 
@@ -918,12 +964,22 @@ def _reemb_novo(session):
                     )
                     if ok:
                         st.session_state["reemb_xlsx_processado_id"] = arq_id
-                        st.success(msg)
+                        # A mensagem precisa sobreviver ao rerun, senao o
+                        # usuario nunca ve as linhas ignoradas.
+                        st.session_state["reemb_import_msg"] = msg
                         st.rerun()
                     else:
                         st.error(msg)
             else:
                 st.session_state.pop("reemb_xlsx_processado_id", None)
+                st.session_state.pop("reemb_import_msg", None)
+
+    msg_import = st.session_state.get("reemb_import_msg")
+    if msg_import:
+        if "IGNORADA" in msg_import or "Atencao" in msg_import:
+            st.warning(msg_import)
+        else:
+            st.success(msg_import)
 
     st.markdown("---")
 
@@ -1022,9 +1078,13 @@ def _reemb_novo(session):
                 a = session.get(Atividade, ativ_id_it)
                 if a:
                     ativ_codigo = f" | {a.codigo}"
+            data_emi = it["data_emissao"]
+            data_emi_fmt = (
+                data_emi.strftime("%d/%m/%Y") if isinstance(data_emi, date) else data_emi
+            )
             col_n.write(
                 f"**{it['fornecedor'] or '—'}** — {it['cat_label']}{ativ_codigo} | "
-                f"emissao: {it['data_emissao']}"
+                f"emissao: {data_emi_fmt}"
                 + (f" | {it['descricao']}" if it['descricao'] else "")
             )
             col_v.write(f"R$ {it['valor']:,.2f}")
