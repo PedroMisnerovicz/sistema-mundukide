@@ -393,6 +393,15 @@ def calcular_ferias(salario: Decimal, dias: int) -> dict:
     }
 
 
+def admitido_ate(data_admissao: date, ano_ref: int, mes_ref: int) -> bool:
+    """True se o tecnico ja estava admitido no mes de referencia.
+
+    Tecnicos admitidos depois do mes de referencia nao entram na folha
+    nem nos encargos daquele mes.
+    """
+    return (data_admissao.year, data_admissao.month) <= (ano_ref, mes_ref)
+
+
 def calcular_proporcional(
     salario_bruto: Decimal,
     data_admissao: date,
@@ -504,12 +513,15 @@ def _gerar_pdf_folha(session, idioma: str = "pt", ano_ref: int = None, mes_ref: 
     if mes_ref is None:
         mes_ref = date.today().month
 
-    tecnicos = (
-        session.query(Tecnico)
-        .filter(Tecnico.ativo == True)
-        .order_by(Tecnico.nome)
-        .all()
-    )
+    tecnicos = [
+        tc for tc in (
+            session.query(Tecnico)
+            .filter(Tecnico.ativo == True)
+            .order_by(Tecnico.nome)
+            .all()
+        )
+        if admitido_ate(tc.data_admissao, ano_ref, mes_ref)
+    ]
 
     pdf = FPDF(orientation="L", format="A4")
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -686,12 +698,15 @@ def _gerar_pdf_encargos(session, idioma: str = "pt", ano_ref: int = None, mes_re
     if mes_ref is None:
         mes_ref = date.today().month
 
-    tecnicos = (
-        session.query(Tecnico)
-        .filter(Tecnico.ativo == True)
-        .order_by(Tecnico.nome)
-        .all()
-    )
+    tecnicos = [
+        tc for tc in (
+            session.query(Tecnico)
+            .filter(Tecnico.ativo == True)
+            .order_by(Tecnico.nome)
+            .all()
+        )
+        if admitido_ate(tc.data_admissao, ano_ref, mes_ref)
+    ]
 
     pdf = FPDF(orientation="L", format="A4")
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -1243,6 +1258,12 @@ def _aba_calculo(session):
         key="folha_nota_input",
     )
     st.session_state["folha_nota"] = nota_pdf
+
+    # So entra quem ja estava admitido no mes de referencia
+    tecnicos = [t for t in tecnicos if admitido_ate(t.data_admissao, ano_ref, mes_ref)]
+    if not tecnicos:
+        st.info("Nenhum tecnico admitido ate o mes de referencia selecionado.")
+        return
 
     # Calcula para cada tecnico (com proporcional se aplicavel)
     linhas = []
