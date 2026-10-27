@@ -204,6 +204,7 @@ Por isso:
 | Visao Geral (Metricas) | 5 cards: Projeto EUR, Projeto BRL, Cambio Medio, Total Gasto, Saldo em Conta. |
 | Termometro de Liberacao | 3 gauges Plotly (1 por remessa). Calculo FIFO. Cores: verde (>=80%), amarelo (50-80%), vermelho (<50%). Alertas de elegibilidade para proxima remessa. |
 | Execucao por Centro de Custo | Grafico de barras horizontais (Teto BRL vs Gasto BRL). Alertas de estouro (>100%) e proximidade (>90%). |
+| Gastos por Atividade | Gasto acumulado por codigo de atividade (A.X.Y), lido direto dos lancamentos. Cards por Resultado (R1/R2/R3), grafico de barras colorido por Resultado, tabela com BRL, EUR (cambio medio) e % do total, subtotais por Resultado e linha "Sem atividade". Alerta quando ha lancamentos sem codigo. |
 | Detalhamento por Categoria | Tabela expansivel por CC com gasto e % por categoria. |
 | **Exportacao PDF** | Botao "Exportar PDF" gera relatorio completo A4 paisagem com todos os graficos (gauge + barras) renderizados como imagem via kaleido. Download como `dashboard_mundukide_YYYYMMDD.pdf`. |
 

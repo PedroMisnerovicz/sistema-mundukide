@@ -6,6 +6,7 @@ Visao gerencial do projeto com:
   - Termometro de Liberacao (regra dos 80% — FIFO)
   - Execucao por Centro de Custo (graficos)
   - Teto por Categoria (novo)
+  - Gastos por Atividade (codigos A.X.Y do financiador, agrupados em R1/R2/R3)
   - Detalhamento por Categoria
   - Exportacao PDF bilíngue (PT/ES)
 """
@@ -65,6 +66,7 @@ def _normalizar_nome_categoria(nome: str) -> str:
 
 from database import get_session
 from models import (
+    Atividade,
     CentroCusto,
     CategoriaDespesa,
     ItemDespesa,
@@ -73,6 +75,10 @@ from models import (
 )
 
 CAMBIO_PROJECAO = Decimal("6.00")
+
+# Cores dos Resultados do projeto no grafico de gastos por atividade.
+CORES_RESULTADO = {"R1": "#3498db", "R2": "#27ae60", "R3": "#8e44ad"}
+COR_SEM_ATIVIDADE = "#95a5a6"
 
 
 # ──────────────── Dicionario de Traducoes ──────────────────
@@ -116,6 +122,16 @@ TRADUCOES = {
         "tipo_global": "global",
         "nenhuma_remessa_cad": "Nenhuma remessa cadastrada.",
         "moeda": "R$",
+        "gastos_atividade": "Gastos por Atividade",
+        "atividade": "Atividade",
+        "descricao": "Descricao",
+        "resultado": "Resultado",
+        "sem_atividade": "Sem atividade",
+        "gasto_eur_label": "Gasto EUR",
+        "pct_total": "% Total",
+        "subtotal": "Subtotal",
+        "total": "Total",
+        "aviso_sem_atividade": "lancamento(s) sem codigo de atividade, somando",
     },
     "es": {
         "titulo": "Dashboard - Control Financiero Mundukide",
@@ -155,6 +171,16 @@ TRADUCOES = {
         "tipo_global": "global",
         "nenhuma_remessa_cad": "Ninguna remesa registrada.",
         "moeda": "R$",
+        "gastos_atividade": "Gastos por Actividad",
+        "atividade": "Actividad",
+        "descricao": "Descripcion",
+        "resultado": "Resultado",
+        "sem_atividade": "Sin actividad",
+        "gasto_eur_label": "Gasto EUR",
+        "pct_total": "% Total",
+        "subtotal": "Subtotal",
+        "total": "Total",
+        "aviso_sem_atividade": "registro(s) sin codigo de actividad, sumando",
     },
 }
 
@@ -243,7 +269,119 @@ def _categorias_com_teto(session):
     )
 
 
+# ─────────────── gastos por atividade (helpers) ─────────────
+
+def _gastos_por_atividade(session):
+    """Gasto acumulado por atividade do projeto, lido direto dos lancamentos.
+
+    Retorna (atividades, sem_atividade, qtd_sem_atividade):
+      - atividades: lista de (Atividade, gasto Decimal) na ordem do catalogo,
+        incluindo as que ainda nao tiveram gasto (gasto = 0);
+      - sem_atividade: soma das despesas lancadas sem codigo de atividade;
+      - qtd_sem_atividade: quantidade desses lancamentos.
+    Qualquer lancamento novo (manual, split, reembolso) entra aqui na hora.
+    """
+    linhas = (
+        session.query(
+            Atividade,
+            sqlfunc.coalesce(sqlfunc.sum(ItemDespesa.valor_brl), 0),
+        )
+        .outerjoin(ItemDespesa, ItemDespesa.atividade_id == Atividade.id)
+        .group_by(Atividade.id)
+        .order_by(Atividade.ordem, Atividade.codigo)
+        .all()
+    )
+    atividades = [(a, Decimal(str(g))) for a, g in linhas]
+
+    sem_ativ, qtd_sem = (
+        session.query(
+            sqlfunc.coalesce(sqlfunc.sum(ItemDespesa.valor_brl), 0),
+            sqlfunc.count(ItemDespesa.id),
+        )
+        .filter(ItemDespesa.atividade_id.is_(None))
+        .first()
+    )
+    return atividades, Decimal(str(sem_ativ)), int(qtd_sem or 0)
+
+
+def _subtotais_por_resultado(atividades):
+    """{'R1': Decimal, 'R2': Decimal, ...} na ordem em que aparecem."""
+    subtotais = {}
+    for a, gasto in atividades:
+        subtotais[a.resultado] = subtotais.get(a.resultado, Decimal("0")) + gasto
+    return subtotais
+
+
+def _descricao_atividade(a, lang="pt") -> str:
+    if lang == "es" and a.descricao_es:
+        return a.descricao_es
+    return a.descricao_pt or ""
+
+
+def _fig_atividades(atividades, sem_ativ, lang="pt", width=None):
+    """Barras horizontais com o gasto de cada atividade, coloridas por Resultado.
+    Cada barra e uma categoria propria no eixo Y, por isso barmode='stack'
+    mantem as barras na largura cheia mesmo com varios traces."""
+    fig = go.Figure()
+    for res in _subtotais_por_resultado(atividades):
+        itens = [(a, g) for a, g in atividades if a.resultado == res]
+        fig.add_trace(go.Bar(
+            y=[a.codigo for a, _ in itens],
+            x=[float(g) for _, g in itens],
+            name=res,
+            orientation="h",
+            marker_color=CORES_RESULTADO.get(res, "#7f8c8d"),
+            hovertext=[_descricao_atividade(a, lang) for a, _ in itens],
+            hovertemplate="%{y}: R$ %{x:,.2f}<br>%{hovertext}<extra></extra>",
+        ))
+    if sem_ativ > 0:
+        fig.add_trace(go.Bar(
+            y=[_t("sem_atividade", lang)],
+            x=[float(sem_ativ)],
+            name=_t("sem_atividade", lang),
+            orientation="h",
+            marker_color=COR_SEM_ATIVIDADE,
+            hovertemplate="%{y}: R$ %{x:,.2f}<extra></extra>",
+        ))
+
+    n_barras = len(atividades) + (1 if sem_ativ > 0 else 0)
+    fig_h = max(300, n_barras * 32 + 60)
+    layout = dict(
+        barmode="stack",
+        height=fig_h,
+        xaxis_title="R$",
+        yaxis=dict(autorange="reversed"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                    traceorder="normal"),
+        margin=dict(l=10, r=10, t=10, b=40),
+    )
+    if width:
+        layout.update(
+            width=width,
+            margin=dict(l=90, r=20, t=30, b=40),
+            paper_bgcolor="white", plot_bgcolor="white",
+        )
+    fig.update_layout(**layout)
+    return fig, fig_h
+
+
 # ──────────────────── geracao de PDF ───────────────────────
+
+def _pdf_safe(texto) -> str:
+    """Fontes core do fpdf2 (Helvetica) so aceitam latin-1; troca o que nao
+    couber (travessao, emoji etc.) por '?' em vez de quebrar a geracao."""
+    return str(texto or "").encode("latin-1", errors="replace").decode("latin-1")
+
+
+def _pdf_ajustar_texto(pdf, texto, largura) -> str:
+    """Trunca o texto com '...' para caber na largura (mm) da celula."""
+    texto = _pdf_safe(texto)
+    limite = largura - 2
+    if pdf.get_string_width(texto) <= limite:
+        return texto
+    while texto and pdf.get_string_width(texto + "...") > limite:
+        texto = texto[:-1]
+    return texto.rstrip() + "..."
 
 def _pdf_section_title(pdf, titulo):
     pdf.set_font("Helvetica", "B", 13)
@@ -529,7 +667,7 @@ def _pdf_teto_categoria(pdf, session, cambio, lang):
             eur_str = f"EUR {cat.teto_eur:,.2f}"
         else:
             teto = cat.teto_brl
-            eur_str = "—"
+            eur_str = "-"
 
         disponivel = teto - gasto
         pct = (gasto / teto * 100).quantize(Decimal("0.1")) if teto > 0 else Decimal("0")
@@ -628,6 +766,105 @@ def _pdf_detalhamento(pdf, session, centros, cambio, lang):
             pdf.ln()
 
         pdf.ln(5)
+
+
+def _pdf_atividades(pdf, session, cambio, total_gasto, lang):
+    """Secao do PDF com o gasto acumulado por atividade (A.X.Y), agrupado
+    por Resultado, com grafico de barras e tabela BRL/EUR."""
+    atividades, sem_ativ, qtd_sem = _gastos_por_atividade(session)
+    if not atividades:
+        return
+
+    m = _t("moeda", lang)
+    usable_w = pdf.w - 20
+
+    fig, fig_h = _fig_atividades(atividades, sem_ativ, lang, width=900)
+    img_bytes = fig.to_image(format="png", scale=2)
+    chart_w = usable_w
+    chart_h = chart_w * fig_h / 900
+
+    # Titulo + grafico ficam juntos na mesma pagina
+    if pdf.get_y() + 14 + chart_h > pdf.h - 15:
+        pdf.add_page()
+    _pdf_section_title(pdf, _t("gastos_atividade", lang))
+    pdf.image(io.BytesIO(img_bytes), x=10, w=chart_w)
+    pdf.ln(5)
+
+    col_w = [usable_w * 0.09, usable_w * 0.53, usable_w * 0.14,
+             usable_w * 0.13, usable_w * 0.11]
+
+    def cabecalho():
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_fill_color(52, 73, 94)
+        pdf.set_text_color(255, 255, 255)
+        headers = [
+            _t("atividade", lang), _t("descricao", lang),
+            f"{_t('gasto_label', lang)} BRL", _t("gasto_eur_label", lang),
+            _t("pct_total", lang),
+        ]
+        for i, h in enumerate(headers):
+            pdf.cell(col_w[i], 7, h, border=1, align="C", fill=True)
+        pdf.ln()
+        pdf.set_text_color(0, 0, 0)
+
+    def pct_str(valor):
+        if total_gasto > 0:
+            return f"{(valor / total_gasto * 100).quantize(Decimal('0.1'))}%"
+        return "0.0%"
+
+    def eur_str(valor):
+        if cambio and cambio > 0:
+            return f"EUR {(valor / cambio).quantize(Decimal('0.01')):,.2f}"
+        return "-"
+
+    def nova_pagina_se_preciso():
+        if pdf.get_y() > pdf.h - 20:
+            pdf.add_page()
+            cabecalho()
+
+    def linha_total(rotulo, valor, fill_rgb, negrito=True):
+        nova_pagina_se_preciso()
+        pdf.set_font("Helvetica", "B" if negrito else "", 9)
+        pdf.set_fill_color(*fill_rgb)
+        pdf.cell(col_w[0] + col_w[1], 6, f"  {_pdf_safe(rotulo)}", border=1, fill=True)
+        pdf.cell(col_w[2], 6, f"{m} {valor:,.2f}", border=1, align="R", fill=True)
+        pdf.cell(col_w[3], 6, eur_str(valor), border=1, align="R", fill=True)
+        pdf.cell(col_w[4], 6, pct_str(valor), border=1, align="C", fill=True)
+        pdf.ln()
+
+    cabecalho()
+    subtotais = _subtotais_por_resultado(atividades)
+    for res, subtotal in subtotais.items():
+        pdf.set_font("Helvetica", "", 9)
+        for a, gasto in atividades:
+            if a.resultado != res:
+                continue
+            nova_pagina_se_preciso()
+            pdf.set_font("Helvetica", "", 9)
+            desc = _pdf_ajustar_texto(pdf, _descricao_atividade(a, lang), col_w[1])
+            pdf.cell(col_w[0], 6, f"  {_pdf_safe(a.codigo)}", border=1)
+            pdf.cell(col_w[1], 6, f"  {desc}", border=1)
+            pdf.cell(col_w[2], 6, f"{m} {gasto:,.2f}", border=1, align="R")
+            pdf.cell(col_w[3], 6, eur_str(gasto), border=1, align="R")
+            pdf.cell(col_w[4], 6, pct_str(gasto), border=1, align="C")
+            pdf.ln()
+        linha_total(f"{_t('subtotal', lang)} {_t('resultado', lang)} {res}",
+                    subtotal, (236, 240, 241))
+
+    if sem_ativ > 0:
+        linha_total(_t("sem_atividade", lang), sem_ativ, (253, 236, 234), negrito=False)
+
+    total_atividades = sum(subtotais.values(), Decimal("0")) + sem_ativ
+    linha_total(_t("total", lang), total_atividades, (214, 234, 248))
+    pdf.ln(2)
+
+    if qtd_sem > 0:
+        _pdf_alert(
+            pdf,
+            f"{qtd_sem} {_t('aviso_sem_atividade', lang)} {m} {sem_ativ:,.2f}",
+            "warning",
+        )
+    pdf.ln(6)
 
 
 def _gerar_xlsx_financiador(session, cambio, data_ini=None, data_fim=None):
@@ -800,6 +1037,7 @@ def _gerar_pdf(session, remessas, centros, cambio, total_gasto, idioma="pt"):
     _pdf_termometro(pdf, remessas, total_gasto, idioma)
     _pdf_execucao_cc(pdf, session, centros, cambio, idioma)
     _pdf_teto_categoria(pdf, session, cambio, idioma)
+    _pdf_atividades(pdf, session, cambio, total_gasto, idioma)
     _pdf_detalhamento(pdf, session, centros, cambio, idioma)
 
     return bytes(pdf.output())
@@ -982,6 +1220,8 @@ def render():
     _secao_execucao_cc(session, centros, cambio)
     st.markdown("---")
     _secao_teto_categoria(session, cambio)
+    st.markdown("---")
+    _secao_atividades(session, cambio, total_gasto)
     st.markdown("---")
     _secao_detalhamento(session, centros, cambio)
 
@@ -1341,6 +1581,105 @@ def _secao_teto_categoria(session, cambio):
             )
         else:
             st.warning(f"{nome}: {pct:.1f}% executado (teto {tipo}). Proximo do teto!")
+
+
+# ──────── secao 3.7: gastos por atividade ──────────────────
+
+def _secao_atividades(session, cambio, total_gasto):
+    st.subheader("Gastos por Atividade")
+    st.caption(
+        "Despesas ja lancadas, agrupadas pelo codigo de atividade (A.X.Y) exigido "
+        "pelo financiador. Atualiza automaticamente a cada novo lancamento."
+    )
+
+    atividades, sem_ativ, qtd_sem = _gastos_por_atividade(session)
+    if not atividades:
+        st.info("Nenhuma atividade cadastrada.")
+        return
+
+    subtotais = _subtotais_por_resultado(atividades)
+
+    # Cards: um por Resultado + um para despesas sem atividade
+    cols = st.columns(len(subtotais) + 1)
+    for col, (res, val) in zip(cols, subtotais.items()):
+        pct = (val / total_gasto * 100) if total_gasto > 0 else Decimal("0")
+        col.metric(f"Resultado {res}", _fmt_brl(val), delta=f"{pct:.1f}% do total",
+                   delta_color="off")
+    pct_sem = (sem_ativ / total_gasto * 100) if total_gasto > 0 else Decimal("0")
+    cols[-1].metric("Sem atividade", _fmt_brl(sem_ativ), delta=f"{pct_sem:.1f}% do total",
+                    delta_color="off")
+
+    fig, _ = _fig_atividades(atividades, sem_ativ, "pt")
+    st.plotly_chart(fig, use_container_width=True)
+
+    def pct_str(valor):
+        if total_gasto > 0:
+            return f"{(valor / total_gasto * 100).quantize(Decimal('0.1'))}%"
+        return "0.0%"
+
+    def eur_str(valor):
+        return _fmt_eur(valor / cambio) if cambio and cambio > 0 else "—"
+
+    dados = []
+    for a, gasto in atividades:
+        dados.append({
+            "Atividade": a.codigo,
+            "Resultado": a.resultado,
+            "Descricao": a.descricao_pt or "",
+            "Gasto BRL": _fmt_brl(gasto),
+            "Gasto EUR": eur_str(gasto),
+            "% do Total": pct_str(gasto),
+        })
+    for res, val in subtotais.items():
+        dados.append({
+            "Atividade": f"Subtotal {res}",
+            "Resultado": res,
+            "Descricao": "",
+            "Gasto BRL": _fmt_brl(val),
+            "Gasto EUR": eur_str(val),
+            "% do Total": pct_str(val),
+        })
+    if sem_ativ > 0:
+        dados.append({
+            "Atividade": "Sem atividade",
+            "Resultado": "—",
+            "Descricao": f"{qtd_sem} lancamento(s) sem codigo de atividade",
+            "Gasto BRL": _fmt_brl(sem_ativ),
+            "Gasto EUR": eur_str(sem_ativ),
+            "% do Total": pct_str(sem_ativ),
+        })
+    total_atividades = sum(subtotais.values(), Decimal("0")) + sem_ativ
+    dados.append({
+        "Atividade": "Total",
+        "Resultado": "",
+        "Descricao": "",
+        "Gasto BRL": _fmt_brl(total_atividades),
+        "Gasto EUR": eur_str(total_atividades),
+        "% do Total": pct_str(total_atividades),
+    })
+
+    st.dataframe(
+        pd.DataFrame(dados),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Atividade": st.column_config.TextColumn("Atividade", width="small"),
+            "Resultado": st.column_config.TextColumn("Resultado", width="small"),
+            "Descricao": st.column_config.TextColumn("Descricao", width="large"),
+        },
+    )
+    st.caption(
+        f"Gasto EUR calculado pelo cambio medio das remessas recebidas "
+        f"(R$ {cambio:,.4f}/€). Subtotais por Resultado e total aparecem nas "
+        f"ultimas linhas."
+    )
+
+    if qtd_sem > 0:
+        st.warning(
+            f"{qtd_sem} lancamento(s) somando {_fmt_brl(sem_ativ)} estao sem codigo "
+            f"de atividade. Informe a atividade em **Lancamentos** para que entrem "
+            f"corretamente no relatorio do financiador."
+        )
 
 
 # ──────── secao 4: detalhamento por categoria ───────────────
