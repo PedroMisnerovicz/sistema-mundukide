@@ -143,6 +143,12 @@ def _apply_migrations():
                             "ADD COLUMN eh_aplicacao BOOLEAN NOT NULL DEFAULT FALSE"
                         ))
 
+                if "conta_ofx" not in cols_tx:
+                    conn.execute(text(
+                        "ALTER TABLE transacoes_bancarias "
+                        "ADD COLUMN conta_ofx VARCHAR(40)"
+                    ))
+
             # ── itens_despesa (Fase 1 do refactor) ───────────
             if _tabela_existe(conn, "itens_despesa"):
                 cols_item = _colunas(conn, "itens_despesa")

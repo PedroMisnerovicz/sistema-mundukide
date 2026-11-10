@@ -251,6 +251,12 @@ class TransacaoBancaria(Base):
         default=func.now(),
         comment="Timestamp da importação do OFX",
     )
+    conta_ofx = Column(
+        String(40),
+        nullable=True,
+        comment="Numero da conta (ACCTID) do arquivo OFX de origem — usado para "
+                "barrar a importacao de extrato de outra conta.",
+    )
 
     # Relacionamento 1:N  →  permite SPLIT
     itens_despesa = relationship(

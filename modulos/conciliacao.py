@@ -10,6 +10,7 @@ Dois fluxos para cada transacao OFX:
   Ambos podem ser combinados na mesma transacao.
 """
 
+import unicodedata
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -31,6 +32,10 @@ from modulos.cache_utils import opcoes_categorias as opcoes_categorias_cached
 
 # Janela (em dias) para sugerir match entre debito bancario e projecao de folha.
 JANELA_MATCH_FOLHA_DIAS = 15
+
+# Janela (em dias) entre a data do debito e a data de pagamento lancada para a
+# conciliacao automatica aceitar o par.
+JANELA_AUTO_DIAS = 7
 
 # Tolerancia em BRL para considerar valor "igual" (arredondamentos).
 TOLERANCIA_MATCH_VALOR = Decimal("0.01")
@@ -312,6 +317,333 @@ def _candidatos_folha(session, tx: TransacaoBancaria) -> list:
     return candidatos
 
 
+# ──────────────── conciliacao automatica ────────────────────
+
+ROTULOS_TIPO_AUTO = {
+    "REEMBOLSO": "Reembolso",
+    "LANCAMENTO": "Lancamento",
+    "RESGATE": "Resgate da aplicacao",
+    "APLICACAO": "Aplicacao financeira",
+}
+
+
+def _sem_acento_maiusculo(texto: str) -> str:
+    s = unicodedata.normalize("NFD", texto or "")
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return s.upper().strip()
+
+
+def propor_conciliacao_automatica(session):
+    """Monta a proposta de conciliacao automatica das transacoes pendentes.
+
+    Regras (so casa o que e inequivoco — o resto fica para a tela manual):
+      - Debito  x Reembolso pendente de mesmo valor total;
+      - Debito  x Lancamento manual pendente de mesmo valor;
+        em ambos, a data de pagamento lancada precisa estar a no maximo
+        JANELA_AUTO_DIAS da data do debito. Primeiro casa as datas identicas,
+        depois a mais proxima.
+      - Credito "RESGATE" / Debito "APLICACAO": movimento da aplicacao
+        financeira (liga a um movimento ja registrado sem extrato, se houver).
+
+    Nao grava nada. Retorna (propostas, sem_par):
+      propostas: lista de dicts {tx_id, data, descricao, valor, tipo, alvo_id,
+                 rotulo, data_lancada, dias}
+      sem_par:   transacoes pendentes sem proposta (ficam para o manual).
+    """
+    from modulos.aplicacoes import movimentos_sem_extrato
+
+    pendentes = (
+        session.query(TransacaoBancaria)
+        .filter(TransacaoBancaria.conciliada == False)
+        .order_by(TransacaoBancaria.data, TransacaoBancaria.id)
+        .all()
+    )
+    if not pendentes:
+        return [], []
+
+    ids_remessa = {
+        r.transacao_bancaria_id
+        for r in session.query(Remessa)
+        .filter(Remessa.transacao_bancaria_id != None)
+        .all()
+    }
+    reembolsos = (
+        session.query(Reembolso)
+        .filter(
+            Reembolso.conciliado == False,
+            Reembolso.transacao_bancaria_id == None,
+        )
+        .all()
+    )
+    itens = (
+        session.query(ItemDespesa)
+        .filter(
+            ItemDespesa.conciliado == False,
+            ItemDespesa.transacao_bancaria_id == None,
+            ItemDespesa.reembolso_id == None,
+        )
+        .all()
+    )
+    movimentos_livres = list(movimentos_sem_extrato(session))
+
+    usados = {"REEMBOLSO": set(), "LANCAMENTO": set(), "MOVIMENTO": set()}
+    propostas = {}  # tx.id -> proposta
+    debitos = []
+    sem_par = []
+
+    def _proposta(tx, tipo, alvo_id, rotulo, data_lancada, dias):
+        return {
+            "tx_id": tx.id,
+            "data": tx.data,
+            "descricao": tx.descricao,
+            "valor": tx.valor,
+            "tipo": tipo,
+            "alvo_id": alvo_id,
+            "rotulo": rotulo,
+            "data_lancada": data_lancada,
+            "dias": dias,
+        }
+
+    for tx in pendentes:
+        # So transacoes "limpas": sem split parcial e sem marcacao especial
+        if tx.itens_despesa or tx.eh_estorno or tx.eh_aplicacao or tx.id in ids_remessa:
+            sem_par.append(tx)
+            continue
+
+        desc = _sem_acento_maiusculo(tx.descricao)
+        tipo_mov = None
+        if tx.tipo == "CREDIT" and desc.startswith("RESGATE"):
+            tipo_mov = "RESGATE"
+        elif tx.tipo == "DEBIT" and desc.startswith("APLICACAO"):
+            tipo_mov = "APLICACAO"
+
+        if tipo_mov:
+            mov = next(
+                (
+                    m for m in movimentos_livres
+                    if m.id not in usados["MOVIMENTO"]
+                    and m.tipo == tipo_mov
+                    and m.valor_brl == abs(tx.valor)
+                ),
+                None,
+            )
+            if mov:
+                usados["MOVIMENTO"].add(mov.id)
+                rotulo = (
+                    f"Movimento ja registrado em {mov.data.strftime('%d/%m/%Y')}"
+                    + (f" — {mov.descricao}" if mov.descricao else "")
+                )
+            else:
+                rotulo = "Novo movimento na Aplicacao Financeira"
+            propostas[tx.id] = _proposta(
+                tx, tipo_mov, mov.id if mov else None, rotulo,
+                mov.data if mov else None, 0,
+            )
+        elif tx.tipo == "DEBIT":
+            debitos.append(tx)
+        else:
+            sem_par.append(tx)  # credito comum: remessa ou estorno, decisao manual
+
+    def _candidatos(tx):
+        valor = abs(tx.valor)
+        cands = []
+        for r in reembolsos:
+            if r.id in usados["REEMBOLSO"] or r.valor_total_brl != valor:
+                continue
+            dias = abs((r.data_pagamento - tx.data).days)
+            if dias <= JANELA_AUTO_DIAS:
+                cands.append((dias, r.id, "REEMBOLSO", r))
+        for i in itens:
+            if i.id in usados["LANCAMENTO"] or i.valor_brl != valor:
+                continue
+            ref = i.data_pagamento or i.data
+            dias = abs((ref - tx.data).days)
+            if dias <= JANELA_AUTO_DIAS:
+                cands.append((dias, i.id, "LANCAMENTO", i))
+        cands.sort(key=lambda c: (c[0], c[1]))
+        return cands
+
+    # Passo 1: so datas identicas. Passo 2: a mais proxima dentro da janela.
+    for somente_mesma_data in (True, False):
+        for tx in debitos:
+            if tx.id in propostas:
+                continue
+            cands = _candidatos(tx)
+            if somente_mesma_data:
+                cands = [c for c in cands if c[0] == 0]
+            if not cands:
+                continue
+            melhor_dias = cands[0][0]
+            empatados = [c for c in cands if c[0] == melhor_dias]
+            # Reembolso e lancamento avulso empatados: nao da para saber qual e
+            if len({c[2] for c in empatados}) > 1:
+                continue
+            dias, alvo_id, tipo, obj = empatados[0]
+            usados[tipo].add(alvo_id)
+            if tipo == "REEMBOLSO":
+                rotulo = f"{obj.beneficiario} ({len(obj.itens_despesa)} despesa(s))"
+                data_lancada = obj.data_pagamento
+            else:
+                cat = obj.categoria_despesa
+                rotulo = f"{obj.fornecedor_cliente or '—'} | {cat.nome if cat else ''}"
+                data_lancada = obj.data_pagamento or obj.data
+            propostas[tx.id] = _proposta(tx, tipo, alvo_id, rotulo, data_lancada, dias)
+
+    sem_par.extend(tx for tx in debitos if tx.id not in propostas)
+    lista = sorted(propostas.values(), key=lambda p: (p["data"], p["tx_id"]))
+    return lista, sem_par
+
+
+def aplicar_conciliacao_automatica(session, propostas: list) -> int:
+    """Grava as propostas escolhidas. Revalida cada uma antes de gravar e
+    faz tudo em uma unica transacao (ou grava todas, ou nenhuma).
+    Retorna a quantidade conciliada."""
+    from modulos.aplicacoes import marcar_transacao_como_aplicacao
+
+    feitas = 0
+    try:
+        for p in propostas:
+            tx = session.get(TransacaoBancaria, p["tx_id"])
+            if tx is None or tx.conciliada or tx.itens_despesa:
+                continue
+            valor = abs(tx.valor)
+
+            if p["tipo"] == "REEMBOLSO":
+                reemb = session.get(Reembolso, p["alvo_id"])
+                if (
+                    reemb is None or reemb.conciliado
+                    or reemb.transacao_bancaria_id is not None
+                    or reemb.valor_total_brl != valor
+                ):
+                    continue
+                reemb.transacao_bancaria_id = tx.id
+                reemb.conciliado = True
+                for it in reemb.itens_despesa:
+                    it.transacao_bancaria_id = tx.id
+                    it.conciliado = True
+                    it.data_pagamento = tx.data
+                    it.data = tx.data
+                tx.conciliada = True
+
+            elif p["tipo"] == "LANCAMENTO":
+                item = session.get(ItemDespesa, p["alvo_id"])
+                if (
+                    item is None or item.conciliado
+                    or item.transacao_bancaria_id is not None
+                    or item.reembolso_id is not None
+                    or item.valor_brl != valor
+                ):
+                    continue
+                item.transacao_bancaria_id = tx.id
+                item.conciliado = True
+                item.data_pagamento = tx.data
+                tx.conciliada = True
+
+            elif p["tipo"] in ("RESGATE", "APLICACAO"):
+                mov = None
+                if p["alvo_id"] is not None:
+                    mov = session.get(MovimentoAplicacao, p["alvo_id"])
+                    if (
+                        mov is None or mov.transacao_bancaria_id is not None
+                        or mov.tipo != p["tipo"] or mov.valor_brl != valor
+                    ):
+                        continue
+                    mov.transacao_bancaria_id = tx.id
+                else:
+                    session.add(MovimentoAplicacao(
+                        data=tx.data,
+                        tipo=p["tipo"],
+                        valor_brl=valor,
+                        descricao=(tx.descricao or "")[:120],
+                        transacao_bancaria_id=tx.id,
+                    ))
+                marcar_transacao_como_aplicacao(session, tx)
+            else:
+                continue
+
+            feitas += 1
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    return feitas
+
+
+def _bloco_conciliacao_automatica(session):
+    """Proposta de conciliacao automatica, com confirmacao em um clique."""
+    aviso = st.session_state.pop("auto_conc_aviso", None)
+    if aviso:
+        st.success(aviso)
+
+    propostas, sem_par = propor_conciliacao_automatica(session)
+
+    st.markdown("### ⚡ Conciliacao automatica")
+    if not propostas:
+        st.caption(
+            "Nenhuma pendencia casa sozinha com um lancamento de mesmo valor "
+            f"(ate {JANELA_AUTO_DIAS} dias de diferenca). Use as opcoes manuais abaixo."
+        )
+        return
+
+    st.caption(
+        "O sistema casou cada linha do extrato com o reembolso ou lancamento de "
+        f"mesmo valor e data mais proxima (ate {JANELA_AUTO_DIAS} dias). "
+        "Confira, desmarque o que nao quiser e confirme. Nada e gravado antes disso."
+    )
+
+    df = pd.DataFrame([
+        {
+            "Conciliar": True,
+            "Data": p["data"].strftime("%d/%m/%Y"),
+            "Extrato": p["descricao"],
+            "Valor (R$)": float(p["valor"]),
+            "Tipo": ROTULOS_TIPO_AUTO[p["tipo"]],
+            "Casa com": p["rotulo"],
+            "Data lancada": (
+                p["data_lancada"].strftime("%d/%m/%Y") if p["data_lancada"] else "—"
+            ),
+            "Dif. dias": p["dias"],
+        }
+        for p in propostas
+    ])
+    editado = st.data_editor(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        disabled=[c for c in df.columns if c != "Conciliar"],
+        column_config={
+            "Valor (R$)": st.column_config.NumberColumn(format="R$ %.2f"),
+        },
+        key="auto_conc_editor_" + "_".join(str(p["tx_id"]) for p in propostas)[:200],
+    )
+    escolhidas = [
+        p for p, marcar in zip(propostas, editado["Conciliar"].tolist()) if marcar
+    ]
+
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("Casadas automaticamente", len(propostas))
+    col_b.metric("Selecionadas", len(escolhidas))
+    col_c.metric("Ficam para o manual", len(sem_par))
+
+    if any(p["tipo"] == "RESGATE" for p in escolhidas):
+        st.info(
+            "Ha resgate(s) na proposta. Depois de confirmar, lance o rendimento e o "
+            "IR de cada resgate em **Aplicacao Financeira**, a partir do extrato do fundo."
+        )
+
+    if st.button(
+        f"Confirmar {len(escolhidas)} conciliacao(oes)",
+        type="primary",
+        key="btn_auto_conciliar",
+        disabled=not escolhidas,
+    ):
+        feitas = aplicar_conciliacao_automatica(session, escolhidas)
+        st.session_state["auto_conc_aviso"] = (
+            f"{feitas} transacao(oes) conciliada(s) automaticamente."
+        )
+        st.rerun()
+
+
 def render():
     st.title("🔗 Conciliacao")
 
@@ -369,12 +701,19 @@ def _aba_pendentes(session):
     )
 
     if n_creditos == 0 and n_debitos == 0:
+        aviso = st.session_state.pop("auto_conc_aviso", None)
+        if aviso:
+            st.success(aviso)
         st.success("Nenhuma transacao pendente de conciliacao!")
         return
 
     col_a, col_b = st.columns(2)
     col_a.metric("Creditos pendentes", n_creditos)
     col_b.metric("Debitos pendentes", n_debitos)
+
+    st.markdown("---")
+
+    _bloco_conciliacao_automatica(session)
 
     st.markdown("---")
 

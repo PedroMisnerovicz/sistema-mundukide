@@ -124,6 +124,23 @@ Por isso:
 - O projeto usa conta bancaria exclusiva.
 - Importacao OFX com deduplicacao por FITID.
 - Transacao so e marcada como conciliada quando 100% alocada.
+- **Travas na importacao** (`analisar_importacao()` em `modulos/importacao_ofx.py`):
+  - Conta: o ACCTID do arquivo e gravado em `TransacaoBancaria.conta_ofx` e comparado
+    com a conta dos extratos ja importados. Conta diferente bloqueia a importacao
+    (so libera marcando a confirmacao).
+  - Reexportacao: o banco nao manda FITID (o sistema gera um por hash + posicao), entao
+    o mesmo periodo exportado com outro intervalo gera FITIDs novos. Linhas com mesma
+    data + valor + descricao de algo ja importado sao tratadas como "possivel duplicata"
+    e ficam de fora por padrao.
+  - Saldo: compara o LEDGERBAL do arquivo com a soma do extrato no sistema (informativo —
+    diverge quando ha movimento entre a ultima transacao do arquivo e a data do saldo).
+- **Conciliacao automatica** (`propor_conciliacao_automatica()` /
+  `aplicar_conciliacao_automatica()` em `modulos/conciliacao.py`): no topo da aba
+  Pendentes, casa cada debito com o reembolso ou lancamento manual de **mesmo valor**
+  e data de pagamento a ate 7 dias (primeiro datas identicas, depois a mais proxima).
+  Credito "RESGATE" / debito "APLICACAO" viram movimento da Aplicacao Financeira.
+  Empate entre reembolso e lancamento avulso, split parcial e credito comum (remessa)
+  ficam para o fluxo manual. Nada e gravado sem o usuario confirmar a proposta.
 
 ---
 

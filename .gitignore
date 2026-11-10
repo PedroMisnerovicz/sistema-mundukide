@@ -5,6 +5,10 @@
 # Secrets do Streamlit (contem a senha)
 .streamlit/secrets.toml
 
+# Extratos bancarios e da aplicacao (dados financeiros reais)
+Extratos Conta Corrente OFX/
+*.ofx
+
 # Python
 __pycache__/
 *.pyc
