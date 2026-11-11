@@ -919,11 +919,16 @@ def _gerar_xlsx_financiador(session, cambio, data_ini=None, data_fim=None):
         # Monta descricao para o financiador no formato:
         #   Despesa normal:    "{nome_categoria} // {CODIGO}"
         #   Despesa reembolso: "Reembolso {beneficiario} - {nome_categoria} // {CODIGO}"
+        #   Salario:           "{nome_categoria} - {nome da pessoa} // {CODIGO}"
+        #                      (nome vem do campo Fornecedor/Cliente do lancamento)
         # Se a despesa nao tem atividade preenchida, omite " // CODIGO".
         # O campo item.descricao (livre, anotacao interna) NAO entra mais aqui.
         nome_cat = cat.nome or ""
+        pessoa = (item.fornecedor_cliente or "").strip()
         if item.reembolso and item.reembolso.beneficiario:
             base = f"Reembolso {item.reembolso.beneficiario} - {nome_cat}".rstrip(" -")
+        elif pessoa and _normalizar_nome_categoria(nome_cat) == "salarios":
+            base = f"{nome_cat} - {pessoa}"
         else:
             base = nome_cat
 
