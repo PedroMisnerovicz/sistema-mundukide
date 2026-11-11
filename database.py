@@ -14,7 +14,19 @@ try:
 except Exception:
     pass
 
+def _forcar_psycopg2(url: str) -> str:
+    """Fixa o driver psycopg2 na URL do PostgreSQL.
+    Versoes novas do SQLAlchemy (2.1+) passaram a usar o psycopg (v3) quando a
+    URL nao diz o driver — e o projeto instala o psycopg2 (requirements.txt).
+    Se a URL ja informa um driver (postgresql+xxx://), ela e respeitada."""
+    for prefixo in ("postgresql://", "postgres://"):
+        if url.startswith(prefixo):
+            return "postgresql+psycopg2://" + url[len(prefixo):]
+    return url
+
+
 if _db_url:
+    _db_url = _forcar_psycopg2(_db_url)
     # PostgreSQL (Supabase / nuvem)
     # Pool configurado para Supabase Session Pooler:
     # - pool_pre_ping: testa conexao antes de usar (evita erros com conexoes mortas)
