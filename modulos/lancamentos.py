@@ -918,6 +918,10 @@ def _reemb_novo(session):
         )
     if "reemb_obs_pending" in st.session_state:
         st.session_state["reemb_obs"] = st.session_state.pop("reemb_obs_pending")
+    # Depois de salvar, esvazia a data de pagamento: cada reembolso tem a sua
+    # e ela nunca deve ser herdada do anterior (nem assumida como "hoje").
+    if st.session_state.pop("reemb_data_pag_limpar", False):
+        st.session_state.pop("reemb_data_pag", None)
 
     # Bloco de import/export Excel
     with st.expander("Importar/Exportar Excel de Reembolso", expanded=False):
@@ -984,16 +988,10 @@ def _reemb_novo(session):
     st.markdown("---")
 
     # Cabecalho do reembolso
-    col1, col2 = st.columns(2)
-    beneficiario = col1.text_input(
+    beneficiario = st.text_input(
         "Beneficiario *", max_chars=200,
         placeholder="Ex: Joao Silva",
         key="reemb_beneficiario",
-    )
-    data_pag = col2.date_input(
-        "Data de Pagamento *", value=date.today(),
-        key="reemb_data_pag",
-        help="Data em que o debito saiu (ou vai sair) do banco",
     )
     observacao = st.text_area(
         "Observacao (opcional)", max_chars=500,
@@ -1099,12 +1097,23 @@ def _reemb_novo(session):
     else:
         st.info("Adicione pelo menos uma despesa para salvar o reembolso.")
 
+    # Data de pagamento: fica junto do botao de salvar e comeca VAZIA, para
+    # nunca gravar "hoje" por engano (vale para digitacao manual e import Excel).
+    col_dp, _ = st.columns([2, 3])
+    data_pag = col_dp.date_input(
+        "Data de Pagamento *", value=None, format="DD/MM/YYYY",
+        key="reemb_data_pag",
+        help="Data em que o debito saiu (ou vai sair) do banco",
+    )
+    if itens and data_pag is None:
+        st.warning("Informe a Data de Pagamento para liberar o botao de salvar.")
+
     # Botao final
     col_salvar, col_limpar, _ = st.columns([1, 1, 3])
     with col_salvar:
         salvar = st.button(
             "Salvar Reembolso", type="primary",
-            disabled=not itens or not beneficiario.strip(),
+            disabled=not itens or not beneficiario.strip() or data_pag is None,
             key="btn_reemb_salvar",
         )
     with col_limpar:
@@ -1118,6 +1127,9 @@ def _reemb_novo(session):
             return
         if not itens:
             st.error("Adicione pelo menos uma despesa.")
+            return
+        if data_pag is None:
+            st.error("Informe a Data de Pagamento.")
             return
 
         total = sum((it["valor"] for it in itens), Decimal("0.00"))
@@ -1151,6 +1163,7 @@ def _reemb_novo(session):
 
             session.commit()
             st.session_state[_REEMB_ITENS_KEY] = []
+            st.session_state["reemb_data_pag_limpar"] = True
             st.success(
                 f"Reembolso de R$ {total:,.2f} para '{beneficiario.strip()}' "
                 f"registrado com {len(itens)} despesa(s)."
