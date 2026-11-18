@@ -32,5 +32,8 @@ desktop.ini
 # Script de migracao (contem credenciais)
 migrar_dados.py
 
+# Programa avulso do carimbo (gerado por carimbo_exe/gerar_exe.bat; grande demais pro GitHub)
+*.exe
+
 # Claude Code
 .claude/

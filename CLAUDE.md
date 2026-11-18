@@ -45,7 +45,11 @@ Atue como um Engenheiro de Software Senior especialista em Python, Pandas, SQLAl
     folha_pagamento.py     # Calculo de folha com encargos BR (sem provisao de ferias/13o)
     fluxo_caixa.py         # Projecao de fluxo de caixa
     dashboard.py           # Dashboard gerencial + exportacao PDF
-    carimbo_pdf.py         # Carimbo AVCD em documentos PDF
+    carimbo_pdf.py         # Carimbo AVCD em documentos PDF (tela Streamlit)
+    carimbo_core.py        # Logica do carimbo, sem Streamlit (usada pela tela e pelo .exe)
+  carimbo_exe/
+    carimbo_app.py         # Programa avulso (janela tkinter) para quem nao acessa o sistema
+    gerar_exe.bat          # Gera CarimboMundukide.exe via PyInstaller (o .exe NAO vai pro GitHub)
 ```
 
 ---
